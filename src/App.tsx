@@ -515,12 +515,12 @@ function App() {
                 🎵 Who let the logs out... 🎵
               </p>
               <a
-                href="https://benjaminwootton.com"
+                href="https://newcadence.io"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-sm text-blue-400 hover:text-blue-300"
               >
-                By @BenjaminWootton
+                By New Cadence
               </a>
               <button
                 onClick={() => setAboutOpen(false)}

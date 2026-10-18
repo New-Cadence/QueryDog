@@ -1,6 +1,6 @@
 QueryDog is a powerful tool for ClickHouse performance optimisation.  Visualise query performance and background activity, identify bottlenecks and optimise cluster performance with a single container.
  
-By [Benjamin Wootton](https://benjaminwootton.com).
+By [New Cadence](https://newcadence.io).
 
 <img width="2054" height="1101" alt="Screenshot 2025-12-09 at 11 31 53 pm" src="https://github.com/user-attachments/assets/e1b52d42-028a-4c46-8631-7fdcaba44747" />
 <img width="2055" height="1101" alt="Screenshot 2025-12-09 at 11 32 10 pm" src="https://github.com/user-attachments/assets/81150e55-b47b-4feb-89cd-02bee733ad4b" />
@@ -10,7 +10,7 @@ By [Benjamin Wootton](https://benjaminwootton.com).
 Clone the repository and create your config:
 
 ```bash
-git clone https://github.com/benjaminwootton/querydog
+git clone https://github.com/New-Cadence/QueryDog
 cd querydog
 cp querydog.yml.example querydog.yml
 ```
@@ -155,5 +155,5 @@ Run `qd help` for the full command list, or `qd <command> --help` for per-comman
 
 ### Next Steps
 
-Please visit https://benjaminwootton.com for more details on the project and my ClickHouse consulting services.
+Please visit https://newcadence.io for more details on the project and our ClickHouse consulting services.
 
