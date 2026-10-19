@@ -18,7 +18,7 @@ import { DatabaseManager } from './components/DatabaseManager';
 import { QueryEditor } from './components/QueryEditor';
 import { useQueryStore } from './stores/queryStore';
 import { useQueryData } from './hooks/useQueryData';
-import { fetchEnvironments, type EnvironmentInfo } from './services/api';
+import { fetchEnvironments, switchEnvironment, type EnvironmentInfo } from './services/api';
 
 type NavItem = 'queries' | 'textlog' | 'partlog' | 'parts' | 'activity' | 'users' | 'cluster' | 'instance' | 'myqueries' | 'alerts';
 type RefreshInterval = 'off' | 5 | 10 | 60 | 600;
@@ -41,6 +41,25 @@ function getCookie(name: string): string | null {
 function setCookie(name: string, value: string, days: number = 365) {
   const expires = new Date(Date.now() + days * 864e5).toUTCString();
   document.cookie = `${name}=${value}; expires=${expires}; path=/`;
+}
+
+
+// Resolve ?env=<name|index> from the current URL. Case-insensitive on name,
+// accepts a 0-based index, returns -1 when nothing matches so callers can
+// cleanly fall back to the server's active index.
+function resolveEnvFromUrl(envs: EnvironmentInfo[]): number {
+  if (typeof window === 'undefined') return -1;
+  const raw = new URLSearchParams(window.location.search).get('env');
+  if (!raw) return -1;
+  const trimmed = raw.trim();
+  if (trimmed === '') return -1;
+  const asNumber = Number(trimmed);
+  if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber < envs.length) {
+    return asNumber;
+  }
+  const target = trimmed.toLowerCase();
+  const byName = envs.findIndex(e => e.name.toLowerCase() === target);
+  return byName;
 }
 
 function App() {
@@ -174,13 +193,25 @@ function App() {
       if (!isMounted) return;
       if (data) {
         setEnvironments(data.environments);
-        setActiveEnvIndex(data.active);
-        // Show which database we're connecting to
-        const activeEnv = data.environments[data.active];
+        // Honour a ?env=<name|index> URL param so an outer app can deep-link
+        // into a specific environment without the user re-picking from the
+        // switcher. Falls back to the server's active index when the param
+        // is absent or doesn't match any configured env.
+        const requested = resolveEnvFromUrl(data.environments);
+        const effectiveIndex = requested >= 0 ? requested : data.active;
+        setActiveEnvIndex(effectiveIndex);
+        const activeEnv = data.environments[effectiveIndex];
         if (activeEnv) {
           setConnectingToName(activeEnv.name);
         }
-        saveCachedEnvironments(data);
+        if (requested >= 0 && requested !== data.active) {
+          // Server state is global, so tell it to switch too; otherwise
+          // subsequent SQL calls would run against data.active.
+          switchEnvironment(requested).catch(err =>
+            console.warn('[querydog] failed to switch via URL param:', err),
+          );
+        }
+        saveCachedEnvironments({ active: effectiveIndex, environments: data.environments });
         setEnvironmentsFetched(true);
       }
     })();
