@@ -85,6 +85,7 @@ function loadConfig(options = {}) {
         cluster: env.cluster || null,
         queries_folder: env.queries_folder || 'queries',
         http_headers: env.http_headers || {},
+        _embeddedId: env._embeddedId || null,
       }));
       return raw.environments.map((env, i) => {
         const name = env.name || 'Default';
