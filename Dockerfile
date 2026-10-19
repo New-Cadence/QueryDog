@@ -60,6 +60,10 @@ RUN cd cli && npm ci --omit=dev
 COPY --from=cli-builder /app/cli/dist ./cli/dist
 COPY cli/config ./cli/config
 
+# Ship the 39 bundled alert checks so a fresh container has a working set
+# out of the box. Users can override by bind-mounting their own alerts/ folder.
+COPY alerts ./alerts
+
 # Copy entrypoint script
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
