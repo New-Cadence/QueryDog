@@ -263,8 +263,7 @@ function getRunLog(type, filename, limit = 50) {
 // env vars when the active env can't be resolved from the config.
 function currentEnv() {
   try {
-    const envs = (typeof config !== 'undefined' && config && Array.isArray(config.environments)) ? config.environments : [];
-    const active = envs.find(e => e._active) || envs[0];
+    const active = Array.isArray(environments) ? environments[activeEnvIndex] : null;
     if (active) {
       return {
         name: active.name,
