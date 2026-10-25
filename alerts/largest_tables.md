@@ -1,1 +1,0 @@
-Lists user tables larger than 100 GB on disk with row counts, compression ratio, active part count, and the time range of stored data. Helpful for capacity planning and identifying retention candidates.

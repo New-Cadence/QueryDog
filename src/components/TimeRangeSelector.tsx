@@ -2,6 +2,20 @@ import { useQueryStore } from '../stores/queryStore';
 import type { BucketSize } from '../types/queryLog';
 import type { ChartAggregation, ChartType } from '../stores/queryStore';
 import { toDateTimeLocalValue } from '../utils/formatters';
+import { TimeRangeBar, TimeRangeBarSelect, type Choice } from './TimeRangeBar';
+
+type QuickId = '15' | '60' | '360' | '1440';
+const QUICK_RANGES: Choice<QuickId>[] = [
+  { value: '15', label: '15m' },
+  { value: '60', label: '1h' },
+  { value: '360', label: '6h' },
+  { value: '1440', label: '24h' },
+];
+const BUCKETS: Choice<BucketSize>[] = [
+  { value: 'second', label: 'Second' },
+  { value: 'minute', label: 'Minute' },
+  { value: 'hour', label: 'Hour' },
+];
 
 const AGGREGATION_LABELS: Record<ChartAggregation, string> = {
   avg: 'Average',
@@ -23,120 +37,39 @@ export function TimeRangeSelector({ usePartLogMetric = false }: TimeRangeSelecto
   const isCountMetric = effectiveMetric === 'count';
   const effectiveChartType = isCountMetric && chartType === 'scatter' ? 'line' : chartType;
 
-  const formatForInput = (date: Date) => toDateTimeLocalValue(date);
-
-  const handleStartChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newStart = new Date(e.target.value);
-    if (!isNaN(newStart.getTime())) {
-      setTimeRange({ ...timeRange, start: newStart });
-    }
-  };
-
-  const handleEndChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newEnd = new Date(e.target.value);
-    if (!isNaN(newEnd.getTime())) {
-      setTimeRange({ ...timeRange, end: newEnd });
-    }
-  };
-
-  const setQuickRange = (minutes: number) => {
-    setRelativeTimeRange(minutes);
-  };
+  const quick = relativeTimeMinutes === null ? null : String(relativeTimeMinutes) as QuickId;
+  const showBucket = effectiveChartType !== 'scatter';
+  // Stacked types split by query kind for every metric; scatter plots individual queries
+  const chartTypes: Choice<ChartType>[] = [
+    { value: 'bar', label: 'Bar' },
+    { value: 'stacked-bar', label: 'Stacked Bar' },
+    { value: 'line', label: 'Line' },
+    { value: 'stacked-line', label: 'Stacked Line' },
+    ...(!isCountMetric ? [{ value: 'scatter' as const, label: 'Scatter' }] : []),
+  ];
 
   return (
-    <div className="flex items-center gap-2 text-xs">
-      <div className="flex items-center gap-1">
-        <label className="text-gray-400">From:</label>
-        <input
-          type="datetime-local"
-          step="1"
-          value={formatForInput(timeRange.start)}
-          onChange={handleStartChange}
-          className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
-        />
-      </div>
-      <div className="flex items-center gap-1">
-        <label className="text-gray-400">To:</label>
-        <input
-          type="datetime-local"
-          step="1"
-          value={formatForInput(timeRange.end)}
-          onChange={handleEndChange}
-          className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
-        />
-      </div>
-      <div className="flex gap-1 ml-2">
-        <button
-          onClick={() => setQuickRange(15)}
-          className={`px-1.5 py-0.5 rounded ${relativeTimeMinutes === 15 ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
-        >
-          15m
-        </button>
-        <button
-          onClick={() => setQuickRange(60)}
-          className={`px-1.5 py-0.5 rounded ${relativeTimeMinutes === 60 ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
-        >
-          1h
-        </button>
-        <button
-          onClick={() => setQuickRange(360)}
-          className={`px-1.5 py-0.5 rounded ${relativeTimeMinutes === 360 ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
-        >
-          6h
-        </button>
-        <button
-          onClick={() => setQuickRange(1440)}
-          className={`px-1.5 py-0.5 rounded ${relativeTimeMinutes === 1440 ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
-        >
-          24h
-        </button>
-      </div>
-      <div className="flex items-center gap-1 ml-2 border-l border-gray-600 pl-2">
-        <label className="text-gray-400">Type:</label>
-        <select
-          value={effectiveChartType}
-          onChange={(e) => setChartType(e.target.value as ChartType)}
-          className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
-        >
-          <option value="bar">Bar</option>
-          {isCountMetric && <option value="stacked-bar">Stacked Bar</option>}
-          <option value="line">Line</option>
-          {isCountMetric && <option value="stacked-line">Stacked Line</option>}
-          {!isCountMetric && <option value="scatter">Scatter</option>}
-        </select>
-      </div>
-      {(effectiveChartType === 'line' || effectiveChartType === 'bar' || effectiveChartType === 'stacked-bar' || effectiveChartType === 'stacked-line') && (
-        <>
-          <div className="flex items-center gap-1 ml-2 border-l border-gray-600 pl-2">
-            <label className="text-gray-400">Bucket:</label>
-            <select
-              value={bucketSize}
-              onChange={(e) => setBucketSize(e.target.value as BucketSize)}
-              className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
-            >
-              <option value="second">Second</option>
-              <option value="minute">Minute</option>
-              <option value="hour">Hour</option>
-            </select>
-          </div>
-          {!isCountMetric && (
-            <div className="flex items-center gap-1 ml-2 border-l border-gray-600 pl-2">
-              <label className="text-gray-400">Aggregation:</label>
-              <select
-                value={chartAggregation}
-                onChange={(e) => setChartAggregation(e.target.value as ChartAggregation)}
-                className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
-              >
-                {(Object.keys(AGGREGATION_LABELS) as ChartAggregation[]).map((agg) => (
-                  <option key={agg} value={agg}>
-                    {AGGREGATION_LABELS[agg]}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </>
+    <TimeRangeBar
+      from={toDateTimeLocalValue(timeRange.start)}
+      to={toDateTimeLocalValue(timeRange.end)}
+      onChange={(from, to) => {
+        const start = new Date(from);
+        const end = new Date(to);
+        if (!isNaN(start.getTime()) && !isNaN(end.getTime())) setTimeRange({ start, end });
+      }}
+      quickRanges={QUICK_RANGES}
+      activeQuick={quick}
+      onQuick={id => setRelativeTimeRange(Number(id))}
+      chartType={effectiveChartType}
+      chartTypes={chartTypes}
+      onChartType={setChartType}
+      bucket={showBucket ? bucketSize : undefined}
+      buckets={BUCKETS}
+      onBucket={setBucketSize}
+      extra={showBucket && !isCountMetric && (
+        <TimeRangeBarSelect label="Aggregation" value={chartAggregation} onChange={setChartAggregation}
+          choices={(Object.keys(AGGREGATION_LABELS) as ChartAggregation[]).map(a => ({ value: a, label: AGGREGATION_LABELS[a] }))} />
       )}
-    </div>
+    />
   );
 }

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import type { QueryLogEntry } from '../types/queryLog';
 import { formatBytes, formatNumber, formatDuration } from '../utils/formatters';
+import { EmptyState } from './ui';
 
 interface QueryCompareModalProps {
   entries: QueryLogEntry[];
@@ -284,7 +285,7 @@ export function QueryCompareModal({ entries, onClose }: QueryCompareModalProps) 
             {expandedSections.settings && (
               <div className="bg-gray-800 rounded max-h-80 overflow-y-auto">
                 {allSettings.length === 0 ? (
-                  <div className="p-3 text-xs text-gray-500">No settings recorded</div>
+                  <EmptyState compact title="No settings recorded" />
                 ) : (
                   <table className="text-xs table-fixed w-full">
                     <thead className="sticky top-0 bg-gray-800">

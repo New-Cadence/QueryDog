@@ -8,6 +8,19 @@ export interface RangeFilter {
   max?: number;
 }
 
+// Number of active query_log filters (value + range) — shared by the Filters
+// button badge and the "N filters active" toolbar label so they always agree.
+export function countActiveFilters(fieldFilters: Record<string, string[]>, rangeFilters: Record<string, RangeFilter> = {}): number {
+  return Object.values(fieldFilters).filter((v) => v.length > 0).length +
+    Object.values(rangeFilters).filter((r) => r.min !== undefined || r.max !== undefined).length;
+}
+
+function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
 export type ChartMetric = 'count' | 'duration' | 'memory' | 'read_rows' | 'written_rows' | 'result_rows';
 export type ChartType = 'bar' | 'stacked-bar' | 'line' | 'stacked-line' | 'scatter';
 export type ChartAggregation = 'avg' | 'sum' | 'min' | 'max';
@@ -74,6 +87,8 @@ interface QueryState {
   totalCount: number;
   loading: boolean;
   error: string | null;
+  // system.query_log is not enabled on the server (shown inline, not as an error)
+  queryLogMissing: boolean;
 
   // Grouped Query Data
   groupedEntries: GroupedQueryEntry[];
@@ -154,6 +169,7 @@ interface QueryState {
   setTotalCount: (count: number) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  setQueryLogMissing: (missing: boolean) => void;
   setTimeRange: (range: TimeRange) => void;
   setRelativeTimeRange: (minutes: number) => void;
   refreshTimeRange: () => void;
@@ -217,6 +233,7 @@ export const useQueryStore = create<QueryState>((set) => ({
   totalCount: 0,
   loading: false,
   error: null,
+  queryLogMissing: false,
 
   // Grouped Query Data
   groupedEntries: [],
@@ -291,6 +308,7 @@ export const useQueryStore = create<QueryState>((set) => ({
   setTotalCount: (totalCount) => set({ totalCount }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
+  setQueryLogMissing: (queryLogMissing) => set({ queryLogMissing }),
   setTimeRange: (timeRange) => set({ timeRange, relativeTimeMinutes: null, currentPage: 0 }),
   setRelativeTimeRange: (minutes) => {
     const end = new Date();
@@ -308,24 +326,27 @@ export const useQueryStore = create<QueryState>((set) => ({
   }),
   setBucketSize: (bucketSize) => set({ bucketSize }),
   setSearch: (search) => set({ search, currentPage: 0, selectedEntry: null, selectedEntries: [] }),
+  // Empty selections are removed rather than stored, so filter counts and the
+  // serialised API params only ever contain filters that actually apply.
   setFieldFilter: (field, values) =>
-    set((state) => ({
-      fieldFilters: { ...state.fieldFilters, [field]: values },
-      currentPage: 0,
-    })),
+    set((state) => {
+      const rest = omit(state.fieldFilters, field);
+      return { fieldFilters: values.length ? { ...rest, [field]: values } : rest, currentPage: 0 };
+    }),
   setRangeFilter: (field, filter) =>
-    set((state) => ({
-      rangeFilters: { ...state.rangeFilters, [field]: filter },
-      currentPage: 0,
-    })),
+    set((state) => {
+      const rest = omit(state.rangeFilters, field);
+      const isSet = filter.min !== undefined || filter.max !== undefined;
+      return { rangeFilters: isSet ? { ...rest, [field]: filter } : rest, currentPage: 0 };
+    }),
   clearFieldFilter: (field) =>
     set((state) => {
-      const { [field]: _, ...rest } = state.fieldFilters;
+      const rest = omit(state.fieldFilters, field);
       return { fieldFilters: rest, currentPage: 0 };
     }),
   clearRangeFilter: (field) =>
     set((state) => {
-      const { [field]: _, ...rest } = state.rangeFilters;
+      const rest = omit(state.rangeFilters, field);
       return { rangeFilters: rest, currentPage: 0 };
     }),
   clearAllFilters: () => set({ fieldFilters: { type: ['QueryFinish'] }, rangeFilters: {}, search: '', currentPage: 0 }),
@@ -384,13 +405,13 @@ export const useQueryStore = create<QueryState>((set) => ({
   setPartLogSortField: (partLogSortField) => set({ partLogSortField, partLogCurrentPage: 0 }),
   setPartLogSortOrder: (partLogSortOrder) => set({ partLogSortOrder, partLogCurrentPage: 0 }),
   setPartLogFieldFilter: (field, values) =>
-    set((state) => ({
-      partLogFieldFilters: { ...state.partLogFieldFilters, [field]: values },
-      partLogCurrentPage: 0,
-    })),
+    set((state) => {
+      const rest = omit(state.partLogFieldFilters, field);
+      return { partLogFieldFilters: values.length ? { ...rest, [field]: values } : rest, partLogCurrentPage: 0 };
+    }),
   clearPartLogFieldFilter: (field) =>
     set((state) => {
-      const { [field]: _, ...rest } = state.partLogFieldFilters;
+      const rest = omit(state.partLogFieldFilters, field);
       return { partLogFieldFilters: rest, partLogCurrentPage: 0 };
     }),
   clearAllPartLogFilters: () => set({ partLogFieldFilters: { event_type: ['NewPart', 'MergeParts', 'DownloadPart', 'RemovePart', 'MutatePart'] }, partLogCurrentPage: 0 }),

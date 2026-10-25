@@ -9,8 +9,39 @@ const API_BASE = '/api';
 // responses use `fetch` directly.
 async function fetchJson<T>(path: string, errorPrefix: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`);
-  if (!response.ok) throw new Error(`${errorPrefix}: ${response.statusText}`);
+  if (!response.ok) throw await apiError(response, errorPrefix);
   return response.json() as Promise<T>;
+}
+
+export interface ApiError extends Error {
+  status?: number;
+  type?: string;
+}
+
+// Build an Error from a non-2xx response, keeping the server's JSON
+// `{ error, type }` body. Without it every failure collapses to the bare
+// status text ("Internal Server Error"), which the UI would misreport as the
+// backend being down.
+async function apiError(response: Response, errorPrefix: string): Promise<ApiError> {
+  const body = await response.json().catch(() => ({} as { error?: string; type?: string }));
+  const err: ApiError = new Error(`${errorPrefix}: ${body.error || response.statusText}`);
+  err.status = response.status;
+  err.type = body.type;
+  return err;
+}
+
+export function missingTableMessage(table: string): string {
+  const setting = table.replace(/^system\./, '');
+  return `${table} is not enabled on this server. Enable <${setting}> in the ClickHouse server config to use this screen.`;
+}
+
+// True when a request failed because a system table (system.query_log,
+// text_log, part_log, ...) is not enabled on the server. The backend reports
+// these as 404 `{ type: 'not_found' }`.
+export function isMissingTableError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as ApiError;
+  return e.type === 'not_found' || /Unknown table|UNKNOWN_TABLE|doesn't exist/.test(e.message || '');
 }
 
 // Common connection error patterns - errors that indicate the server/database is unreachable
@@ -48,6 +79,12 @@ function extractConnectionError(message: string): string {
 // Transform error messages into user-friendly versions
 export function getUserFriendlyError(message: string): string {
   const cleaned = extractConnectionError(message);
+
+  // A system log table that isn't enabled is a server config issue, not an outage
+  const missingSystemTable = cleaned.match(/Unknown table[^']*'(system\.\w+)'/);
+  if (missingSystemTable) {
+    return missingTableMessage(missingSystemTable[1]);
+  }
 
   // Server/proxy errors indicate backend is down
   if (isServerError(cleaned)) {
@@ -98,10 +135,14 @@ export async function fetchHealth(): Promise<{ status: string; error?: string }>
 export interface EnvironmentInfo {
   index: number;
   name: string;
+  // Optional display labels from querydog.yml
+  organisation?: string | null;
+  environment?: string | null;
   host: string;
   port: number;
   user: string;
   database: string;
+  deployment?: 'cloud' | 'oss';
 }
 
 export async function fetchEnvironments(): Promise<{ active: number; environments: EnvironmentInfo[] }> {
@@ -122,6 +163,8 @@ export async function switchEnvironment(index: number): Promise<{ name: string; 
 export interface FullEnvironmentInfo {
   index: number;
   name: string;
+  organisation?: string | null;
+  environment?: string | null;
   host: string;
   port: number;
   user: string;
@@ -256,12 +299,17 @@ export async function fetchStackedTimeSeries(
   bucketSize: BucketSize,
   search: string,
   filters: Record<string, string[]>,
-  rangeFilters: Record<string, RangeFilter> = {}
+  rangeFilters: Record<string, RangeFilter> = {},
+  // What each query kind's value is: a count, or e.g. the average duration
+  metric: string = 'count',
+  aggregation: string = 'avg'
 ): Promise<StackedTimeSeriesPoint[]> {
   const params = new URLSearchParams({
     start: formatDateTime(timeRange.start),
     end: formatDateTime(timeRange.end),
     bucket: bucketSize,
+    metric,
+    agg: aggregation,
   });
 
   if (search) {
@@ -285,7 +333,8 @@ export async function fetchHistogram(
   search: string,
   filters: Record<string, string[]>,
   limit = 20,
-  bucketSize?: BucketSize
+  bucketSize?: BucketSize,
+  rangeFilters: Record<string, RangeFilter> = {}
 ): Promise<HistogramData[]> {
   const params = new URLSearchParams({
     start: formatDateTime(timeRange.start),
@@ -303,6 +352,10 @@ export async function fetchHistogram(
 
   if (Object.keys(filters).length > 0) {
     params.set('filters', JSON.stringify(filters));
+  }
+
+  if (Object.keys(rangeFilters).length > 0) {
+    params.set('rangeFilters', JSON.stringify(rangeFilters));
   }
 
   return fetchJson(`/query-log/histogram/${field}?${params}`, 'Failed to fetch histogram');
@@ -351,9 +404,7 @@ export async function fetchTotalCount(
   }
 
   const response = await fetch(`${API_BASE}/query-log/count?${params}`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch count: ${response.statusText}`);
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch count');
   const data = await response.json();
   return data.total;
 }
@@ -558,15 +609,7 @@ export async function fetchPartLog(
   }
 
   const response = await fetch(`${API_BASE}/part-log?${params}`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const errorMessage = errorData.error || response.statusText;
-    const error: any = new Error(errorMessage);
-    error.status = response.status;
-    error.type = errorData.type;
-    error.details = errorData.details;
-    throw error;
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch part log');
   return response.json();
 }
 
@@ -584,30 +627,14 @@ export async function fetchPartLogCount(
   }
 
   const response = await fetch(`${API_BASE}/part-log/count?${params}`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const errorMessage = errorData.error || response.statusText;
-    const error: any = new Error(errorMessage);
-    error.status = response.status;
-    error.type = errorData.type;
-    error.details = errorData.details;
-    throw error;
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch part log');
   const data = await response.json();
   return data.total;
 }
 
 export async function fetchPartLogColumnMetadata(): Promise<ColumnMetadata[]> {
   const response = await fetch(`${API_BASE}/part-log/columns`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const errorMessage = errorData.error || response.statusText;
-    const error: any = new Error(errorMessage);
-    error.status = response.status;
-    error.type = errorData.type;
-    error.details = errorData.details;
-    throw error;
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch part log');
   return response.json();
 }
 
@@ -681,15 +708,7 @@ export async function fetchPartLogTimeSeries(
   }
 
   const response = await fetch(`${API_BASE}/part-log/timeseries?${params}`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const errorMessage = errorData.error || response.statusText;
-    const error: any = new Error(errorMessage);
-    error.status = response.status;
-    error.type = errorData.type;
-    error.details = errorData.details;
-    throw error;
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch part log');
   return response.json();
 }
 
@@ -709,15 +728,7 @@ export async function fetchPartLogStackedTimeSeries(
   }
 
   const response = await fetch(`${API_BASE}/part-log/timeseries-stacked?${params}`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const errorMessage = errorData.error || response.statusText;
-    const error: any = new Error(errorMessage);
-    error.status = response.status;
-    error.type = errorData.type;
-    error.details = errorData.details;
-    throw error;
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch part log');
   return response.json();
 }
 
@@ -1479,9 +1490,7 @@ export async function fetchTextLogCount(
   }
 
   const response = await fetch(`${API_BASE}/text-log/count?${params}`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch text log count: ${response.statusText}`);
-  }
+  if (!response.ok) throw await apiError(response, 'Failed to fetch text log count');
   const data = await response.json();
   return data.total;
 }
@@ -1489,13 +1498,18 @@ export async function fetchTextLogCount(
 export async function fetchTextLogTimeSeries(
   timeRange: TimeRange,
   bucket: BucketSize,
-  filters: Record<string, string[]>
+  filters: Record<string, string[]>,
+  search?: string
 ): Promise<TextLogTimeSeriesPoint[]> {
   const params = new URLSearchParams({
     start: formatDateTime(timeRange.start),
     end: formatDateTime(timeRange.end),
     bucket,
   });
+
+  if (search) {
+    params.set('search', search);
+  }
 
   if (Object.keys(filters).length > 0) {
     params.set('filters', JSON.stringify(filters));

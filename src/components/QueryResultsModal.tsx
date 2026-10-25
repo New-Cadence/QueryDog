@@ -1,27 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
-import { AllCommunityModule, ModuleRegistry, themeAlpine } from 'ag-grid-community';
+import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef } from 'ag-grid-community';
 import { X, Loader2, Play, Copy, Check } from 'lucide-react';
+import { useGridTheme } from '../hooks/useTheme';
+import { formatDuration } from '../utils/formatters';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
-
-const darkTheme = themeAlpine.withParams({
-  backgroundColor: '#111827',
-  headerBackgroundColor: '#1f2937',
-  oddRowBackgroundColor: '#111827',
-  rowHoverColor: '#1f2937',
-  borderColor: '#374151',
-  foregroundColor: '#9ca3af',
-  headerTextColor: '#f3f4f6',
-  fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-  fontSize: 10,
-  headerFontSize: 11,
-  headerFontWeight: 600,
-  cellTextColor: '#d1d5db',
-  rowHeight: 28,
-  headerHeight: 30,
-});
 
 export interface QueryRunResult {
   data: Record<string, unknown>[];
@@ -39,12 +25,6 @@ interface QueryResultsModalProps {
   onClose: () => void;
 }
 
-function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return '-';
-  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
-  return ms.toFixed(0) + 'ms';
-}
-
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'object') return JSON.stringify(value);
@@ -59,6 +39,7 @@ export function QueryResultsModal({
   initialResult,
   onClose,
 }: QueryResultsModalProps) {
+  const gridTheme = useGridTheme();
   const [result, setResult] = useState<QueryRunResult | null>(initialResult ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -234,8 +215,8 @@ export function QueryResultsModal({
             </div>
           ) : (
             <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-              <AgGridReact
-                theme={darkTheme}
+              <AgGridReact {...GRID_OVERLAYS}
+                theme={gridTheme}
                 rowData={result?.data ?? []}
                 columnDefs={columnDefs}
                 defaultColDef={defaultColDef}

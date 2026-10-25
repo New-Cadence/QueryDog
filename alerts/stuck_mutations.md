@@ -1,1 +1,0 @@
-Lists mutations that have been pending for more than an hour without being killed, including age, parts remaining, and any recent failure reason. Old unfinished mutations usually indicate a stuck ALTER that needs attention.

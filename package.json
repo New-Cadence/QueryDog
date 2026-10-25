@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
-    "dev:server": "node server/index.js",
+    "dev:server": "npm run build:server && node server/index.js",
     "dev:all": "concurrently --kill-others --kill-signal SIGTERM \"npm run dev\" \"npm run dev:server\"",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && npm run build:server",
+    "build:server": "esbuild src/recommendations/server.ts --bundle --platform=node --format=esm --outfile=server/generated/recommendations.mjs --log-level=warning",
     "start": "node server/index.js",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "hash-password": "node scripts/hash-password.mjs"
   },
   "dependencies": {
     "@clickhouse/client": "^1.18.5",
@@ -26,6 +28,7 @@
     "figlet": "^1.11.0",
     "js-yaml": "^4.1.1",
     "lucide-react": "^0.555.0",
+    "nodemailer": "^10.2.1",
     "postcss": "^8.5.14",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",

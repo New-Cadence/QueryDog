@@ -1,1 +1,0 @@
-Lists distinct server errors recorded in the last 5 minutes, excluding noisy user-facing errors like syntax or unknown identifier. Highlights infrastructure-level problems such as corruption, disk space, memory limits, and Keeper exceptions.

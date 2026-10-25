@@ -5,7 +5,8 @@ import type { ChartAggregation, PartLogStackedTimeSeriesPoint } from '../stores/
 import { Activity, Clock } from 'lucide-react';
 import { format } from 'date-fns';
 import { useIsLightMode } from '../hooks/useTheme';
-import { parseServerTime } from '../utils/formatters';
+import { formatDuration, parseServerTime } from '../utils/formatters';
+import { LoadingState } from './ui';
 
 function useChartColors() {
   const isLight = useIsLightMode();
@@ -35,7 +36,6 @@ const EVENT_TYPE_COLORS: Record<keyof Omit<PartLogStackedTimeSeriesPoint, 'time'
 };
 
 function getChartConfig(metric: 'count' | 'duration', aggregation: ChartAggregation) {
-  const formatDuration = (v: number) => v >= 1000 ? (v / 1000).toFixed(2) + 's' : v.toFixed(0) + 'ms';
 
   if (metric === 'count') {
     return {
@@ -84,7 +84,7 @@ export function PartLogTimelineChart() {
       case 'second':
         return format(date, 'HH:mm:ss');
       case 'hour':
-        return format(date, 'MMM d HH:mm');
+        return format(date, 'dd-MMM HH:mm');
       default:
         return format(date, 'HH:mm');
     }
@@ -120,8 +120,8 @@ export function PartLogTimelineChart() {
     return (
       <div>
         {renderTabs()}
-        <div className="h-72 bg-gray-900 border border-gray-700 rounded flex items-center justify-center">
-          <span className="text-gray-400 text-xs">Loading...</span>
+        <div className="h-72 bg-gray-900 border border-gray-700 rounded flex">
+          <LoadingState />
         </div>
       </div>
     );

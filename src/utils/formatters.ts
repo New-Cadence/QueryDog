@@ -65,16 +65,57 @@ export function toDateTimeLocalValue(date: Date): string {
     `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-export function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '-';
-  const d = parseServerTime(value);
-  if (Number.isNaN(d.getTime())) return '-';
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
+// The app's date style is 25-Dec-2026, with times as 24-hour HH:MM:SS
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+// A bare 'YYYY-MM-DD' is a calendar day, not an instant: read and print it
+// in UTC so no timezone moves it to a neighbouring day
+const toDisplayDate = (value: unknown): { d: Date; utc: boolean } | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const utc = typeof value === 'string' && DATE_ONLY.test(value.trim());
+  const d = utc ? new Date(`${(value as string).trim()}T00:00:00Z`) : parseServerTime(value);
+  return Number.isNaN(d.getTime()) ? null : { d, utc };
+};
+
+const dayMonth = (d: Date, utc: boolean) =>
+  `${pad2(utc ? d.getUTCDate() : d.getDate())}-${MONTHS[utc ? d.getUTCMonth() : d.getMonth()]}`;
+
+// 25-Dec-2026
+export function formatDate(value: unknown, fallback = '-'): string {
+  const v = toDisplayDate(value);
+  if (!v) return fallback;
+  return `${dayMonth(v.d, v.utc)}-${v.utc ? v.d.getUTCFullYear() : v.d.getFullYear()}`;
+}
+
+// 25-Dec, for chart axes where the year would crowd the ticks
+export function formatDayMonth(value: unknown, fallback = '-'): string {
+  const v = toDisplayDate(value);
+  return v ? dayMonth(v.d, v.utc) : fallback;
+}
+
+// Dec-2026
+export function formatMonthYear(value: unknown, fallback = '-'): string {
+  const v = toDisplayDate(value);
+  if (!v) return fallback;
+  return `${MONTHS[v.utc ? v.d.getUTCMonth() : v.d.getMonth()]}-${v.utc ? v.d.getUTCFullYear() : v.d.getFullYear()}`;
+}
+
+// 18:42 / 18:42:17 / 18:42:17.123 in the viewer's timezone
+export function formatTime(value: unknown, { seconds = true, ms = false }: { seconds?: boolean; ms?: boolean } = {}, fallback = '-'): string {
+  const v = toDisplayDate(value);
+  if (!v) return fallback;
+  const d = v.d;
+  let out = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  if (seconds || ms) out += `:${pad2(d.getSeconds())}`;
+  if (ms) out += `.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  return out;
+}
+
+// 25-Dec-2026 18:42:17
+export function formatDateTime(value: unknown, opts: { seconds?: boolean; ms?: boolean } = {}, fallback = '-'): string {
+  const v = toDisplayDate(value);
+  if (!v) return fallback;
+  return `${formatDate(v.d)} ${formatTime(v.d, opts)}`;
 }

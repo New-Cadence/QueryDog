@@ -536,10 +536,12 @@ function TreeLeaf({ icon, label, sublabel, badges, onInfo }: {
 }
 
 interface DatabaseBrowserProps {
-  onClose: () => void;
+  onClose?: () => void;
+  // Render inline (e.g. inside the Data Dictionary mode) instead of as a modal
+  embedded?: boolean;
 }
 
-export function DatabaseBrowser({ onClose }: DatabaseBrowserProps) {
+export function DatabaseBrowser({ onClose, embedded = false }: DatabaseBrowserProps) {
   const [viewMode, setViewMode] = useState<'tree' | 'graph'>('tree');
   const [databases, setDatabases] = useState<BrowserDatabase[]>([]);
   const [users, setUsers] = useState<BrowserUser[]>([]);
@@ -1435,9 +1437,9 @@ export function DatabaseBrowser({ onClose }: DatabaseBrowserProps) {
   const isLoading = loading || loadingTables || loadingPartitions || loadingParts || loadingColumns || loadingProjections || loadingProjectionParts || loadingIndexes;
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={onClose}>
+    <div className={embedded ? 'h-full py-3' : 'fixed inset-0 bg-black/70 flex items-center justify-center z-50'} onClick={onClose}>
       <div
-        className="bg-gray-900 border border-gray-700 rounded-lg w-[95vw] h-[90vh] overflow-hidden flex flex-col"
+        className={`bg-gray-900 border border-gray-700 rounded-lg overflow-hidden flex flex-col ${embedded ? 'w-full h-full' : 'w-[95vw] h-[90vh]'}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -1467,9 +1469,11 @@ export function DatabaseBrowser({ onClose }: DatabaseBrowserProps) {
               </button>
             </div>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-white">
-            <X className="w-4 h-4" />
-          </button>
+          {onClose && (
+            <button onClick={onClose} className="text-gray-400 hover:text-white">
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
         {/* Breadcrumb */}

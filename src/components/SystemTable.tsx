@@ -1,13 +1,55 @@
 import { useMemo, useCallback, useEffect, useState, useRef, useImperativeHandle, forwardRef } from 'react';
+import { createPortal } from 'react-dom';
 import { AgGridReact } from 'ag-grid-react';
 import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef, SortChangedEvent, ICellRendererParams, FirstDataRenderedEvent } from 'ag-grid-community';
-import { Settings, X, Eye, RefreshCw } from 'lucide-react';
+import { Settings, X, Eye, Database } from 'lucide-react';
 import type { ColumnMetadata } from '../types/queryLog';
 import { createColumnsFromMetadata, type ColumnConfig } from '../types/queryLog';
 import { useQueryStore } from '../stores/queryStore';
 import { useGridTheme } from '../hooks/useTheme';
-import { formatBytes, formatNumber, parseServerTime } from '../utils/formatters';
+import { formatBytes, formatNumber, formatDateTime } from '../utils/formatters';
+import { isMissingTableError } from '../services/api';
+import { useClientFilters, type ClientFilterField } from '../hooks/useClientFilters';
+import { ClientFilterPanel } from './ClientFilterPanel';
+import { EmptyState, ToolbarSearch } from './ui';
+import { GRID_OVERLAYS } from './gridOverlays';
+
+type Row = Record<string, unknown>;
+
+const NON_FILTERABLE_TYPE = /^(Array|Map|Tuple|Nullable\((Array|Map))|DateTime|Date|Float|Decimal|JSON|Object/;
+const MAX_AUTO_FILTER_FIELDS = 8;
+const MAX_AUTO_FILTER_VALUES = 30;
+
+// Pick columns worth offering as value filters: low-cardinality columns
+// (between 2 and 30 distinct values in the loaded rows), visible ones first.
+function deriveFilterFields(columns: ColumnConfig[], data: Row[]): ClientFilterField<Row>[] {
+  const candidates = columns.length > 0
+    ? [...columns].sort((a, b) => Number(b.visible) - Number(a.visible))
+    : Object.keys(data[0] ?? {}).map((field) => ({ field, headerName: field, type: '' }));
+  const fields: ClientFilterField<Row>[] = [];
+  for (const col of candidates) {
+    if (fields.length >= MAX_AUTO_FILTER_FIELDS) break;
+    if (NON_FILTERABLE_TYPE.test(col.type)) continue;
+    const distinct = new Set<string>();
+    for (const row of data) {
+      const v = row[col.field];
+      if (v !== null && typeof v === 'object') { distinct.clear(); break; }
+      distinct.add(String(v ?? ''));
+      if (distinct.size > MAX_AUTO_FILTER_VALUES) break;
+    }
+    if (distinct.size >= 2 && distinct.size <= MAX_AUTO_FILTER_VALUES && distinct.size < data.length) {
+      fields.push({ field: col.field, label: col.headerName });
+    }
+  }
+  return fields;
+}
+
+function rowSearchText(row: Row): string {
+  return Object.values(row)
+    .map((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')))
+    .join(' ');
+}
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -62,6 +104,12 @@ interface SystemTableProps {
   defaultSort?: Array<{ colId: string; sort: 'asc' | 'desc' }>;
   onCellClick?: (field: string, value: unknown, data: Record<string, unknown>) => void;
   search?: string;
+  // When set, the table renders the standard Filters / search / row-count
+  // toolbar into this element and filters its rows client-side.
+  toolbarContainer?: HTMLElement | null;
+  // Explicit filter fields for the toolbar; derived from the data when omitted
+  filterFields?: ClientFilterField<Row>[];
+  searchPlaceholder?: string;
 }
 
 function SystemTableInner({
@@ -82,12 +130,16 @@ function SystemTableInner({
   columnWidthOverrides,
   defaultSort,
   search,
+  toolbarContainer,
+  filterFields,
+  searchPlaceholder,
 }: SystemTableProps, ref: React.ForwardedRef<SystemTableRef>) {
   const gridTheme = useGridTheme();
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [columns, setColumns] = useState<ColumnConfig[]>(defaultColumns || []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [missingTable, setMissingTable] = useState(false);
   const [columnSelectorOpen, setColumnSelectorOpen] = useState(false);
   const columnsLoadedRef = useRef(false);
 
@@ -131,11 +183,14 @@ function SystemTableInner({
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setMissingTable(false);
     try {
       const result = await fetchData(filters);
       setData(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load data');
+      setData([]);
+      if (isMissingTableError(err)) setMissingTable(true);
+      else setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
       setLoading(false);
     }
@@ -156,6 +211,13 @@ function SystemTableInner({
     }
     loadData();
   }, [globalRefreshTrigger, loadData]);
+
+  const toolbarFields = useMemo(
+    () => filterFields ?? (toolbarContainer ? deriveFilterFields(columns, data) : []),
+    [filterFields, toolbarContainer, columns, data]
+  );
+  const clientFilters = useClientFilters(data, toolbarFields, rowSearchText);
+  const rows = toolbarContainer ? clientFilters.filtered : data;
 
   const toggleColumnVisibility = useCallback((field: string) => {
     setColumns(cols => cols.map(c => c.field === field ? { ...c, visible: !c.visible } : c));
@@ -252,10 +314,7 @@ function SystemTableInner({
       if (col.field.includes('time') && col.type.includes('DateTime')) {
         def.valueFormatter = (params) => {
           if (!params.value) return '-';
-          const date = parseServerTime(params.value);
-          return date.toLocaleString('en-US', {
-            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
-          });
+          return formatDateTime(params.value, { seconds: false });
         };
       }
 
@@ -291,24 +350,60 @@ function SystemTableInner({
     sortingOrder: ['desc', 'asc'],
   }), []);
 
+  const toolbar = toolbarContainer && createPortal(
+    <>
+      <div className="flex items-center gap-3 min-w-0">
+        {toolbarFields.length > 0 && (
+          <ClientFilterPanel
+            rows={data}
+            fields={toolbarFields}
+            filters={clientFilters.filters}
+            onChange={clientFilters.setFilter}
+            onClearAll={clientFilters.clearAll}
+          />
+        )}
+        <ToolbarSearch value={clientFilters.search} onChange={clientFilters.setSearch} placeholder={searchPlaceholder} />
+      </div>
+      <div className="flex items-center gap-4 text-xs shrink-0">
+        <span className="text-gray-400">
+          <span className="text-white font-medium">{rows.length.toLocaleString()}</span>
+          {rows.length !== data.length && ` of ${data.length.toLocaleString()}`} rows
+        </span>
+        {clientFilters.activeCount > 0 && (
+          <span className="text-blue-400">
+            {clientFilters.activeCount} filter{clientFilters.activeCount > 1 ? 's' : ''} active
+          </span>
+        )}
+      </div>
+    </>,
+    toolbarContainer
+  );
+
+  if (missingTable) {
+    return (
+      <>
+        {toolbar}
+        <EmptyState icon={Database} title={title ? `${title} is not available` : 'Not available on this server'}>
+          The system table behind this view does not exist on this ClickHouse server (it may be disabled in the server config or unsupported by this version).
+        </EmptyState>
+      </>
+    );
+  }
+
   return (
     <div className="h-full flex flex-col bg-gray-900 border border-gray-700 rounded overflow-hidden">
+      {toolbar}
+      {hideHeader && error && (
+        <div className="px-3 py-1.5 text-xs bg-red-900/40 border-b border-red-800 text-red-300 break-words">{error}</div>
+      )}
       {!hideHeader && (
         <div className="flex items-center justify-between px-3 py-2 bg-gray-900/50 border-b border-gray-700">
           <div className="flex items-center gap-3">
             {!hideTitle && title && <h2 className="text-sm font-semibold text-white">{title}</h2>}
-            <span className="text-xs text-gray-400">{data.length.toLocaleString()} rows</span>
+            <span className="text-xs text-gray-400">{rows.length.toLocaleString()} rows</span>
             {error && <span className="text-xs text-red-400">{error}</span>}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={loadData}
-              disabled={loading}
-              className="p-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
-              title="Refresh"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            </button>
             {columns.length > 0 && (
               <div className="relative">
                 <button
@@ -350,9 +445,9 @@ function SystemTableInner({
         </div>
       )}
       <div className="flex-1">
-        <AgGridReact
+        <AgGridReact {...GRID_OVERLAYS}
           theme={gridTheme}
-          rowData={data}
+          rowData={rows}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}
           onSortChanged={onSortChanged}

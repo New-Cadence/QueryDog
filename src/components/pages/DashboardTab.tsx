@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { RefreshCw, Activity, GitMerge, Cpu, HardDrive, Layers, Database } from 'lucide-react';
+import { ComposedChart, Line, Area, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { Activity, GitMerge, Cpu, HardDrive, Layers, Database } from 'lucide-react';
 import {
   fetchMetricLogTimeSeries,
   fetchAsyncMetricLogTimeSeries,
+  getUserFriendlyError,
   type MetricLogTimeSeriesPoint,
 } from '../../services/api';
 import { parseServerTime, toDateTimeLocalValue } from '../../utils/formatters';
+import { LoadingState } from '../ui';
 
 type DashboardSource = 'queries' | 'merges' | 'memory' | 'io' | 'threadpool' | 'caches';
 
@@ -216,13 +218,29 @@ function formatTimeAxis(time: string): string {
 
 // ==================== CHART COMPONENTS ====================
 
+// Each chart plots one gauge-like metric (or a pool's size and tasks), so the
+// useful views are line, area and bar
+type MetricChartKind = 'line' | 'area' | 'bar';
+const METRIC_CHART_KINDS: { value: MetricChartKind; label: string }[] = [
+  { value: 'line', label: 'Line' },
+  { value: 'area', label: 'Area' },
+  { value: 'bar', label: 'Bar' },
+];
+
+function metricSeries(kind: MetricChartKind, dataKey: string, color: string, name?: string) {
+  if (kind === 'bar') return <Bar key={dataKey} dataKey={dataKey} fill={color} fillOpacity={0.8} isAnimationActive={false} name={name} />;
+  if (kind === 'area') return <Area key={dataKey} type="monotone" dataKey={dataKey} stroke={color} fill={color} fillOpacity={0.25} strokeWidth={1.5} dot={false} isAnimationActive={false} name={name} />;
+  return <Line key={dataKey} type="monotone" dataKey={dataKey} stroke={color} strokeWidth={1.5} dot={false} isAnimationActive={false} name={name} />;
+}
+
 interface MetricChartProps {
+  kind: MetricChartKind;
   metric: string;
   data: MetricLogTimeSeriesPoint[];
   colorIndex: number;
 }
 
-function MetricChart({ metric, data, colorIndex }: MetricChartProps) {
+function MetricChart({ kind, metric, data, colorIndex }: MetricChartProps) {
   const color = getMetricColor(colorIndex);
   const displayName = formatMetricName(metric);
   const latestValue = data.length > 0 ? Number(data[data.length - 1][metric]) || 0 : 0;
@@ -239,7 +257,7 @@ function MetricChart({ metric, data, colorIndex }: MetricChartProps) {
       </div>
       <div className="h-48">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
+          <ComposedChart data={data} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
             <XAxis
               dataKey="time"
               tick={{ fontSize: 9, fill: '#6b7280' }}
@@ -261,8 +279,8 @@ function MetricChart({ metric, data, colorIndex }: MetricChartProps) {
               formatter={(value: number | string) => [formatValue(value), displayName]}
               labelFormatter={(label) => parseServerTime(label).toLocaleTimeString()}
             />
-            <Line type="monotone" dataKey={metric} stroke={color} strokeWidth={1.5} dot={false} isAnimationActive={false} />
-          </LineChart>
+            {metricSeries(kind, metric, color)}
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
     </div>
@@ -270,6 +288,7 @@ function MetricChart({ metric, data, colorIndex }: MetricChartProps) {
 }
 
 interface PoolChartProps {
+  kind: MetricChartKind;
   poolName: string;
   sizeMetric: string;
   taskMetric: string;
@@ -277,7 +296,7 @@ interface PoolChartProps {
   colorIndex: number;
 }
 
-function PoolChart({ poolName, sizeMetric, taskMetric, data, colorIndex }: PoolChartProps) {
+function PoolChart({ kind, poolName, sizeMetric, taskMetric, data, colorIndex }: PoolChartProps) {
   const sizeColor = getMetricColor(colorIndex * 2);
   const taskColor = getMetricColor(colorIndex * 2 + 1);
   const latestSize = data.length > 0 ? Number(data[data.length - 1][sizeMetric]) || 0 : 0;
@@ -294,7 +313,7 @@ function PoolChart({ poolName, sizeMetric, taskMetric, data, colorIndex }: PoolC
       </div>
       <div className="h-48">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
+          <ComposedChart data={data} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
             <XAxis
               dataKey="time"
               tick={{ fontSize: 9, fill: '#6b7280' }}
@@ -328,9 +347,9 @@ function PoolChart({ poolName, sizeMetric, taskMetric, data, colorIndex }: PoolC
                 </span>
               )}
             />
-            <Line type="monotone" dataKey={sizeMetric} stroke={sizeColor} strokeWidth={1.5} dot={false} isAnimationActive={false} name="Size" />
-            <Line type="monotone" dataKey={taskMetric} stroke={taskColor} strokeWidth={1.5} dot={false} isAnimationActive={false} name="Tasks" />
-          </LineChart>
+            {metricSeries(kind, sizeMetric, sizeColor, 'Size')}
+            {metricSeries(kind, taskMetric, taskColor, 'Tasks')}
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
     </div>
@@ -360,6 +379,7 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
   const [endTime, setEndTime] = useState<Date>(() => new Date());
   const [relativeMinutes, setRelativeMinutes] = useState<number | null>(60);
   const [bucketSize, setBucketSize] = useState<'second' | 'minute' | 'hour'>('minute');
+  const [chartKind, setChartKind] = useState<MetricChartKind>('line');
   const [metricData, setMetricData] = useState<MetricLogTimeSeriesPoint[]>([]);
   const [asyncData, setAsyncData] = useState<MetricLogTimeSeriesPoint[]>([]);
   const [loading, setLoading] = useState(true);
@@ -409,7 +429,8 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
       }
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load data');
+      // Maps a missing system.metric_log to "not enabled on this server" guidance
+      setError(getUserFriendlyError(err instanceof Error ? err.message : 'Failed to load data'));
     } finally {
       setLoading(false);
     }
@@ -513,19 +534,21 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
             <option value="hour">Hour</option>
           </select>
         </div>
+        <div className="flex items-center gap-1 ml-2 border-l border-gray-600 pl-2">
+          <label className="text-gray-400">Type:</label>
+          <select
+            value={chartKind}
+            onChange={(e) => setChartKind(e.target.value as MetricChartKind)}
+            className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
+          >
+            {METRIC_CHART_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+          </select>
+        </div>
       </div>
       <div className="flex items-center gap-3">
         <span className="text-xs text-gray-500">
           {metricsCount} metrics
         </span>
-        <button
-          onClick={loadData}
-          disabled={loading}
-          className="p-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
-          title="Refresh"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
       </div>
     </>,
     filterBarContainer,
@@ -537,7 +560,7 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
         {filterBarContent}
         <div className="h-full flex items-center justify-center">
           <div className="text-center">
-            <div className="text-red-400 text-sm mb-2">{error}</div>
+            <div className="text-red-400 text-sm mb-2 max-w-lg">{error}</div>
             <button onClick={loadData} className="text-xs text-blue-400 hover:text-blue-300">
               Retry
             </button>
@@ -571,9 +594,7 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
       {/* Charts Grid */}
       <div className="flex-1 overflow-y-auto p-3">
         {loading && !hasData ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-gray-400 text-sm">Loading dashboard...</div>
-          </div>
+          <LoadingState label="Loading dashboard…" />
         ) : !hasData ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-gray-400 text-sm">
@@ -584,6 +605,7 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
           <div className="grid grid-cols-3 gap-3">
             {THREAD_POOL_PAIRS.map((pool, index) => (
               <PoolChart
+                kind={chartKind}
                 key={pool.name}
                 poolName={pool.name}
                 sizeMetric={pool.size}
@@ -596,16 +618,16 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
         ) : activeSource === 'memory' ? (
           <div className="grid grid-cols-3 gap-3">
             {MEMORY_METRICS.map((metric, index) => (
-              <MetricChart key={metric} metric={metric} data={metricData} colorIndex={index} />
+              <MetricChart kind={chartKind} key={metric} metric={metric} data={metricData} colorIndex={index} />
             ))}
             {MEMORY_ASYNC_METRICS.map((metric, index) => (
-              <MetricChart key={metric} metric={metric} data={asyncData} colorIndex={MEMORY_METRICS.length + index} />
+              <MetricChart kind={chartKind} key={metric} metric={metric} data={asyncData} colorIndex={MEMORY_METRICS.length + index} />
             ))}
           </div>
         ) : (
           <div className="grid grid-cols-3 gap-3">
             {getMetricsForSource(activeSource).map((metric, index) => (
-              <MetricChart key={metric} metric={metric} data={metricData} colorIndex={index} />
+              <MetricChart kind={chartKind} key={metric} metric={metric} data={metricData} colorIndex={index} />
             ))}
           </div>
         )}

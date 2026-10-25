@@ -3,6 +3,7 @@ import { Activity, GitMerge, Zap, RefreshCw, Settings, X, HardDrive, Upload, Net
 import { SystemTable, type SystemTableRef } from '../SystemTable';
 import { ActivityFilterPanel } from '../ActivityFilterPanel';
 import { ProfileEventsModal } from '../ProfileEventsModal';
+import { PageTabs, PageToolbar, ToolbarSearch } from '../ui';
 import { useQueryStore } from '../../stores/queryStore';
 import type { QueryLogEntry } from '../../types/queryLog';
 import {
@@ -125,6 +126,7 @@ const DISTRIBUTED_DDL_FILTERABLE_FIELDS = [
 
 export function ActivityPage() {
   const [activeTab, setActiveTab] = useState<ActivityTab>('processes');
+  const [search, setSearch] = useState('');
   const { selectedEntry, setSelectedEntry } = useQueryStore();
 
   // Refs to SystemTables for column toggling
@@ -204,7 +206,8 @@ export function ActivityPage() {
   }, []);
   const handleClearProcessesFilter = useCallback((field: string) => {
     setProcessesFilters((prev) => {
-      const { [field]: _, ...rest } = prev;
+      const rest = { ...prev };
+      delete rest[field];
       return rest;
     });
   }, []);
@@ -223,7 +226,8 @@ export function ActivityPage() {
   }, []);
   const handleClearMergesFilter = useCallback((field: string) => {
     setMergesFilters((prev) => {
-      const { [field]: _, ...rest } = prev;
+      const rest = { ...prev };
+      delete rest[field];
       return rest;
     });
   }, []);
@@ -242,7 +246,8 @@ export function ActivityPage() {
   }, []);
   const handleClearMutationsFilter = useCallback((field: string) => {
     setMutationsFilters((prev) => {
-      const { [field]: _, ...rest } = prev;
+      const rest = { ...prev };
+      delete rest[field];
       return rest;
     });
   }, []);
@@ -261,7 +266,8 @@ export function ActivityPage() {
   }, []);
   const handleClearRefreshesFilter = useCallback((field: string) => {
     setRefreshesFilters((prev) => {
-      const { [field]: _, ...rest } = prev;
+      const rest = { ...prev };
+      delete rest[field];
       return rest;
     });
   }, []);
@@ -285,7 +291,8 @@ export function ActivityPage() {
   }, []);
   const handleClearAsyncInsertsFilter = useCallback((field: string) => {
     setAsyncInsertsFilters((prev) => {
-      const { [field]: _, ...rest } = prev;
+      const rest = { ...prev };
+      delete rest[field];
       return rest;
     });
   }, []);
@@ -304,7 +311,8 @@ export function ActivityPage() {
   }, []);
   const handleClearDistributedDDLFilter = useCallback((field: string) => {
     setDistributedDDLFilters((prev) => {
-      const { [field]: _, ...rest } = prev;
+      const rest = { ...prev };
+      delete rest[field];
       return rest;
     });
   }, []);
@@ -336,8 +344,8 @@ export function ActivityPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Filter bar */}
-      <div className="bg-gray-900/50 border-b border-gray-700 px-1.5 h-9 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
+      <PageToolbar
+        left={<>
           {activeTab === 'processes' && (
             <ActivityFilterPanel
               filters={processesFilters}
@@ -398,8 +406,9 @@ export function ActivityPage() {
               filterableFields={DISTRIBUTED_DDL_FILTERABLE_FIELDS}
             />
           )}
-        </div>
-        <div className="flex items-center gap-4 text-xs">
+          <ToolbarSearch value={search} onChange={setSearch} placeholder="Search loaded rows..." />
+        </>}
+        right={<div className="flex items-center gap-4 text-xs">
           {activeTab === 'processes' && processesFilterCount > 0 && (
             <span className="text-blue-400">
               {processesFilterCount} filter{processesFilterCount > 1 ? 's' : ''} active
@@ -430,27 +439,16 @@ export function ActivityPage() {
               {distributedDDLFilterCount} filter{distributedDDLFilterCount > 1 ? 's' : ''} active
             </span>
           )}
-        </div>
-      </div>
+        </div>}
+      />
 
       {/* Tabs */}
-      <div className="border-b border-gray-700 mx-4 flex items-center gap-1 shrink-0">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => { setActiveTab(id); setColumnSelectorOpen(false); }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
-              activeTab === id
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            <Icon className="w-3 h-3" />
-            {label}
-          </button>
-        ))}
-        {/* Column Selector */}
-        <div className="ml-auto relative">
+      <PageTabs
+        tabs={tabs}
+        active={activeTab}
+        onChange={(id) => { setActiveTab(id); setColumnSelectorOpen(false); setSearch(''); }}
+        right={
+        <div className="relative">
           <button
             onClick={() => setColumnSelectorOpen(!columnSelectorOpen)}
             className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
@@ -485,7 +483,8 @@ export function ActivityPage() {
             </>
           )}
         </div>
-      </div>
+        }
+      />
 
       {/* Content */}
       <div className="flex-1 overflow-hidden px-1.5 pt-3 pb-4">
@@ -500,6 +499,7 @@ export function ActivityPage() {
             onColumnsChange={setProcessesColumns}
             hideTitle
             hideHeader={false}
+            search={search}
             showActionColumn
             onRowAction={handleProcessAction}
           />
@@ -514,6 +514,7 @@ export function ActivityPage() {
             onColumnsChange={setMergesColumns}
             hideTitle
             hideHeader={false}
+            search={search}
           />
         )}
         {activeTab === 'mutations' && (
@@ -527,6 +528,7 @@ export function ActivityPage() {
             onColumnsChange={setMutationsColumns}
             hideTitle
             hideHeader={false}
+            search={search}
           />
         )}
         {activeTab === 'refreshes' && (
@@ -540,6 +542,7 @@ export function ActivityPage() {
             onColumnsChange={setRefreshesColumns}
             hideTitle
             hideHeader={false}
+            search={search}
           />
         )}
         {activeTab === 'queryCache' && (
@@ -551,6 +554,7 @@ export function ActivityPage() {
             onColumnsChange={setQueryCacheColumns}
             hideTitle
             hideHeader={false}
+            search={search}
           />
         )}
         {activeTab === 'asyncInserts' && (
@@ -564,6 +568,7 @@ export function ActivityPage() {
             onColumnsChange={setAsyncInsertsColumns}
             hideTitle
             hideHeader={false}
+            search={search}
           />
         )}
         {activeTab === 'distributedDDL' && (
@@ -577,6 +582,7 @@ export function ActivityPage() {
             onColumnsChange={setDistributedDDLColumns}
             hideTitle
             hideHeader={false}
+            search={search}
           />
         )}
       </div>

@@ -1,56 +1,69 @@
-# QueryDog configuration.
-#
-#   cp querydog.yml.example querydog.yml
-#
-# Then edit the entries below. Every environment listed here appears in the
-# environment switcher in the UI and can be selected on the CLI with
-# `-e <name|number>` (partial names work too).
-#
-# Required per environment: name, host.
-# Everything else has the defaults shown.
+client: "clienta"
+organisation_name: "ACME Corp"
 
 environments:
-  # ClickHouse running on your own machine.
-  #
-  # Use `host.docker.internal` rather than `localhost` when QueryDog itself runs
-  # in Docker (as it does with `docker compose up`): inside the container,
-  # `localhost` is the container, not your machine. Use "localhost" only when
-  # running QueryDog directly with `npm run dev`.
-  - name: "Local"
+  - name: "Development"
+    environment: "development"
+    cluster: false
+    scheduler: false
     host: "host.docker.internal"
-    port: 8123           # 8123 = HTTP, 8443 = HTTPS
+    port: 8123
     user: "default"
     password: ""
     database: "default"
-    secure: true
-    # Optional: cluster name for clusterAllReplicas() queries
-    # cluster: "default"
-    # Optional: custom queries folder path
-    # queries_folder: "queries"
-    # Optional: custom HTTP headers sent with every ClickHouse request
-    # http_headers:
-    #   X-Custom-Header: "value"
-    secure: false        # true for HTTPS (ClickHouse Cloud and most managed hosts)
+    secure: false
 
-  # A remote cluster — e.g. ClickHouse Cloud. Uncomment and fill in the host.
-  # - name: "Production"
-  #   host: "abc123.us-east-1.aws.clickhouse.cloud"
-  #   port: 8443
-  #   user: "default"
-  #   password: "your-password"
-  #   database: "default"
-  #   secure: true
-  #
-  #   # Optional settings, all shown with their defaults:
-  #
-  #   # Cluster name. Set it on a multi-node cluster so QueryDog wraps system
-  #   # table reads in clusterAllReplicas() and reports across every node
-  #   # instead of only the one it connected to.
-  #   cluster: null
-  #
-  #   # Folder holding this environment's saved .sql queries, relative to the
-  #   # working directory (mounted at /app/queries under Docker Compose).
-  #   queries_folder: "queries"
-  #
-  #   # Set to false to accept self-signed / internal TLS certificates.
-  #   tls_reject_unauthorized: true
+  - name: "Test"
+    environment: "test"
+    cluster: true
+    host: "your-test-service.eu-west-2.aws.clickhouse.cloud"
+    port: 8443
+    user: "default"
+    password: "your-password"
+    database: "default"
+    secure: true
+    deployment: cloud
+    cloud_api:
+      key_id: "your-key-id"
+      key_secret: "your-key-secret"
+      organization_id: "your-organization-id"
+      service_id: "your-test-service-id"
+
+  - name: "Production"
+    environment: "production"
+    default: true
+    cluster: true
+    cluster_name: "default"
+    host: "your-production-service.eu-west-2.aws.clickhouse.cloud"
+    port: 8443
+    user: "default"
+    password: "your-password"
+    database: "default"
+    secure: true
+    deployment: cloud
+    cloud_api:
+      key_id: "your-key-id"
+      key_secret: "your-key-secret"
+      organization_id: "your-organization-id"
+      service_id: "your-production-service-id"
+
+scheduler:
+  enabled: true
+  environments: all
+  jobs:
+    monitoring:
+      every: 5m
+    dataquality:
+      every: 1h
+    performance:
+      every: 6h
+    recommendations:
+      every: 6h
+
+# Login (optional). Each user has a username and a scrypt password hash;
+# make a hash with: npm run hash-password -- '<password>'
+# With no users listed, Convoy runs without a login.
+# auth:
+#   users:
+#     - username: admin
+#       password_hash: "scrypt$16384$<salt>$<hash>"

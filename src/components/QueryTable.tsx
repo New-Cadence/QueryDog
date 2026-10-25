@@ -6,7 +6,8 @@ import { Eye, Pin } from 'lucide-react';
 import { useQueryStore } from '../stores/queryStore';
 import type { QueryLogEntry } from '../types/queryLog';
 import { useGridTheme, useIsLightMode } from '../hooks/useTheme';
-import { formatBytes, formatNumber, parseServerTime } from '../utils/formatters';
+import { formatBytes, formatNumber, formatDateTime } from '../utils/formatters';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 // Register AG Grid Community modules
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -153,17 +154,7 @@ export function QueryTable() {
         case 'query_start_time':
           def.valueFormatter = (params) => {
             if (!params.value) return '';
-            const date = parseServerTime(params.value);
-            const base = date.toLocaleString('en-US', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: false,
-            });
-            const ms = date.getMilliseconds().toString().padStart(3, '0');
-            return `${base}.${ms}`;
+            return formatDateTime(params.value, { ms: true });
           };
           def.cellStyle = { color: colorTimestamp };
           break;
@@ -274,7 +265,7 @@ export function QueryTable() {
           background-color: rgba(59, 130, 246, 0.25) !important;
         }
       `}</style>
-      <AgGridReact<QueryLogEntry>
+      <AgGridReact<QueryLogEntry> {...GRID_OVERLAYS}
         ref={gridRef}
         theme={gridTheme}
         rowData={unpinnedEntries}

@@ -51,6 +51,8 @@ COPY server ./server
 
 # Copy built frontend from builder stage
 COPY --from=frontend-builder /app/dist ./dist
+# Recommendation providers bundled for the backend scheduler (npm run build:server)
+COPY --from=frontend-builder /app/server/generated ./server/generated
 
 # Copy CLI package files and install dependencies
 COPY cli/package*.json ./cli/
@@ -60,9 +62,10 @@ RUN cd cli && npm ci --omit=dev
 COPY --from=cli-builder /app/cli/dist ./cli/dist
 COPY cli/config ./cli/config
 
-# Ship the 39 bundled alert checks so a fresh container has a working set
-# out of the box. Users can override by bind-mounting their own alerts/ folder.
-COPY alerts ./alerts
+# Ship the bundled client folder (monitoring checks, alert rules, performance
+# queries, data quality assertions) so a fresh container works out of the box.
+# Bind-mount another client folder and set `client:` in querydog.yml to swap it.
+COPY clienta ./clienta
 
 # Copy entrypoint script
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

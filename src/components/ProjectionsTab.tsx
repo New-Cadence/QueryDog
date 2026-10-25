@@ -2,10 +2,12 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef, ICellRendererParams, FirstDataRenderedEvent } from 'ag-grid-community';
-import { Eye, X, Loader2 } from 'lucide-react';
+import { Eye, X } from 'lucide-react';
 import { fetchSystemProjections, fetchProjectionParts, type SystemProjection, type BrowserProjectionPart } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
-import { formatBytes, formatNumber, parseServerTime } from '../utils/formatters';
+import { formatBytes, formatNumber, formatDateTime } from '../utils/formatters';
+import { LoadingState } from './ui';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -150,7 +152,7 @@ export function ProjectionsTab({ filters, search }: ProjectionsTabProps) {
 
   return (
     <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-      <AgGridReact<SystemProjection>
+      <AgGridReact<SystemProjection> {...GRID_OVERLAYS}
         theme={gridTheme}
         rowData={projections}
         columnDefs={columnDefs}
@@ -205,10 +207,7 @@ export function ProjectionsTab({ filters, search }: ProjectionsTabProps) {
 
               {/* Stats */}
               {partsLoading ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">
-                  <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                  Loading parts...
-                </div>
+                <div className="h-32 flex"><LoadingState label="Loading parts…" /></div>
               ) : partStats ? (
                 <>
                   <div className="grid grid-cols-6 gap-2 mb-4">
@@ -263,13 +262,7 @@ export function ProjectionsTab({ filters, search }: ProjectionsTabProps) {
                             <td className="p-2 font-mono text-gray-400">{part.parent_part_name || '-'}</td>
                             <td className="p-2 text-right text-red-300">
                               {part.modification_time
-                                ? parseServerTime(part.modification_time).toLocaleString('en-US', {
-                                    month: 'short',
-                                    day: 'numeric',
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                    hour12: false,
-                                  })
+                                ? formatDateTime(part.modification_time, { seconds: false })
                                 : '-'}
                             </td>
                           </tr>

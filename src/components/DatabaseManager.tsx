@@ -5,6 +5,7 @@ import {
   switchEnvironment,
   type FullEnvironmentInfo,
 } from '../services/api';
+import { LoadingState } from './ui';
 
 interface DatabaseManagerProps {
   isOpen: boolean;
@@ -65,10 +66,13 @@ export function DatabaseManager({ isOpen, onClose, onConnect, connectedEnvIndex 
     }
   };
 
+  // Only show the Organisation column when some environment sets one
+  const showOrganisation = environments.some(e => e.organisation);
+
   return (
     <>
       <div className="fixed inset-0 bg-black/60 z-50" onClick={onClose} />
-      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 p-6 w-[700px] max-w-[95vw] max-h-[90vh] overflow-y-auto">
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 p-6 w-[1000px] max-w-[95vw] max-h-[90vh] overflow-y-auto">
         <button
           onClick={onClose}
           className="absolute top-3 right-3 text-gray-400 hover:text-white"
@@ -98,19 +102,18 @@ export function DatabaseManager({ isOpen, onClose, onConnect, connectedEnvIndex 
 
         <div className="space-y-3">
           {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
-            </div>
+            <LoadingState label="Loading connections…" />
           ) : environments.length === 0 ? (
             <div className="text-center py-8 text-gray-400">
               No connections configured. Add environments to your querydog.yml file.
             </div>
           ) : (
-            <div className="bg-gray-800 rounded max-h-[30rem] overflow-y-auto">
-              <table className="w-full text-xs">
+            <div className="bg-gray-800 rounded max-h-[30rem] overflow-auto">
+              <table className="w-full text-xs whitespace-nowrap">
                 <thead className="sticky top-0 bg-gray-800">
                   <tr className="border-b border-gray-700">
-                    <th className="text-left p-2 text-gray-400">Name</th>
+                    {showOrganisation && <th className="text-left p-2 text-gray-400">Organisation</th>}
+                    <th className="text-left p-2 text-gray-400">Environment</th>
                     <th className="text-left p-2 text-gray-400">Host</th>
                     <th className="text-left p-2 text-gray-400">User</th>
                     <th className="text-center p-2 text-gray-400 w-16">TLS</th>
@@ -123,9 +126,10 @@ export function DatabaseManager({ isOpen, onClose, onConnect, connectedEnvIndex 
                       key={env.index}
                       className={`border-b border-gray-700/50 hover:bg-gray-700/30 ${connectedEnvIndex === env.index ? 'bg-blue-900/20' : ''}`}
                     >
+                      {showOrganisation && <td className="p-2 text-gray-300" title={env.name}>{env.organisation || <span className="italic text-gray-500">Unspecified</span>}</td>}
                       <td className="p-2">
                         <div className="flex items-center gap-2">
-                          <span className="text-blue-300 font-medium">{env.name}</span>
+                          <span className="text-blue-300 font-medium" title={env.name}>{env.environment || env.name}</span>
                           {connectedEnvIndex === env.index && (
                             <span className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded">Connected</span>
                           )}

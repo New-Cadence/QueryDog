@@ -13,7 +13,9 @@ import { DictionariesTab } from '../DictionariesTab';
 import { fetchParts, fetchPartsColumns, fetchPartsCount, fetchPartitionsSummary, fetchPartitionsSummaryColumns, fetchPartitionsSummaryCount, fetchGroupedParts, fetchTablePartitions, fetchPartitionParts, fetchTableCompression, fetchBrowserColumns, fetchBrowserSampleData, fetchBrowserTables, fetchMergeTreeIndex, fetchTableDefinition, fetchDatabasesSummary, type GroupedPartsEntry, type TablePartitionEntry, type PartitionPartEntry, type ColumnCompressionEntry, type BrowserColumn, type BrowserTable, type MergeTreeIndexEntry, type DatabaseSummary } from '../../services/api';
 import { useQueryStore } from '../../stores/queryStore';
 import { useGridTheme } from '../../hooks/useTheme';
-import { formatBytes, formatNumber, parseServerTime } from '../../utils/formatters';
+import { formatBytes, formatNumber, parseServerTime, formatDateTime, formatDate } from '../../utils/formatters';
+import { LoadingState, EmptyState } from '../ui';
+import { GRID_OVERLAYS } from '../gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -96,11 +98,6 @@ export function PartsPage() {
     }
   }, [databaseFilter]);
 
-  // Filtered databases data
-  const filteredDatabasesData = useMemo(() => {
-    if (!databaseFilter) return databasesData;
-    return databasesData.filter(db => db.database === databaseFilter);
-  }, [databasesData, databaseFilter]);
 
   // Modal state for partition details
   const [selectedTable, setSelectedTable] = useState<{ database: string; table: string } | null>(null);
@@ -251,6 +248,16 @@ export function PartsPage() {
   );
 
   const partsFilterCount = Object.values(partsFilters).filter((v) => v.length > 0).length;
+
+  // The Databases tab follows the same Database filter and search as the other tabs
+  const filteredDatabasesData = useMemo(() => {
+    const databases = partsFilters.database ?? [];
+    const term = partsSearch.trim().toLowerCase();
+    return databasesData.filter(db =>
+      (databases.length === 0 || databases.includes(db.database)) &&
+      (!term || db.database.toLowerCase().includes(term))
+    );
+  }, [databasesData, partsFilters.database, partsSearch]);
 
   // Partitions uses aggregated endpoint (grouped by partition_id)
   const fetchPartitionsWithFilters = useCallback(
@@ -642,15 +649,7 @@ export function PartsPage() {
       cellStyle: { color: '#fca5a5' },
       valueFormatter: (params) => {
         if (!params.value) return '-';
-        const date = parseServerTime(params.value);
-        return date.toLocaleString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false,
-        });
+        return formatDateTime(params.value);
       },
     },
   ], [handleViewPartitions, handleViewCompression]);
@@ -777,15 +776,7 @@ export function PartsPage() {
       cellStyle: { color: '#fca5a5' },
       valueFormatter: (params) => {
         if (!params.value) return '-';
-        const date = parseServerTime(params.value);
-        return date.toLocaleString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false,
-        });
+        return formatDateTime(params.value);
       },
     },
   ], [EyeButtonRenderer]);
@@ -986,7 +977,7 @@ export function PartsPage() {
         <div className="flex items-center gap-4 text-xs">
           {(partsFilterCount > 0 || partsSearch) && (
             <span className="text-blue-400">
-              {partsFilterCount > 0 && `${partsFilterCount} filter${partsFilterCount > 1 ? 's' : ''}`}
+              {partsFilterCount > 0 && `${partsFilterCount} filter${partsFilterCount > 1 ? 's' : ''} active`}
               {partsFilterCount > 0 && partsSearch && ', '}
               {partsSearch && 'search active'}
             </span>
@@ -995,7 +986,7 @@ export function PartsPage() {
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-700 mx-4 flex items-center justify-between shrink-0">
+      <div className="border-b border-gray-700 px-1.5 pt-3 flex items-center justify-between shrink-0">
         <div className="flex flex-wrap items-center gap-1">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
@@ -1123,7 +1114,7 @@ export function PartsPage() {
       <div className="flex-1 overflow-hidden px-1.5 pt-3 pb-4">
         {activeTab === 'databases' && (
           <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-            <AgGridReact<DatabaseSummary>
+            <AgGridReact<DatabaseSummary> {...GRID_OVERLAYS}
               key={`databases-${databaseFilter}-${databasesHiddenColumns.size}`}
               theme={gridTheme}
               rowData={filteredDatabasesData}
@@ -1145,7 +1136,7 @@ export function PartsPage() {
         )}
         {activeTab === 'grouped' && (
           <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-            <AgGridReact<GroupedPartsEntry>
+            <AgGridReact<GroupedPartsEntry> {...GRID_OVERLAYS}
               key={`grouped-${JSON.stringify(partsFilters)}-${partsSearch}-${groupedHiddenColumns.size}`}
               theme={gridTheme}
               rowData={groupedData}
@@ -1328,9 +1319,9 @@ export function PartsPage() {
 
             <div className="flex-1 overflow-auto flex flex-col">
               {partitionDetailsLoading ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
+                <div className="h-32 flex"><LoadingState /></div>
               ) : partitionDetails.length === 0 ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">No partitions found</div>
+                <EmptyState compact title="No partitions found" />
               ) : (
                 <>
                   {/* Stats Panel */}
@@ -1357,7 +1348,7 @@ export function PartsPage() {
                     <div className="bg-gray-800 p-2 rounded">
                       <div className="text-xs text-gray-400">Last Modified</div>
                       <div className="text-sm font-semibold text-white">
-                        {new Date(Math.max(...partitionDetails.map(p => parseServerTime(p.newest_part).getTime()))).toLocaleDateString()}
+                        {formatDate(new Date(Math.max(...partitionDetails.map(p => parseServerTime(p.newest_part).getTime()))))}
                       </div>
                     </div>
                     </div>
@@ -1434,9 +1425,9 @@ export function PartsPage() {
                       <div className="flex flex-col flex-1">
                     <h3 className="text-xs font-semibold text-gray-300 mb-2">Table Definition</h3>
                     {definitionLoading ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">Loading definition...</div>
+                      <div className="h-20 flex"><LoadingState label="Loading definition…" /></div>
                     ) : !tableDefinition ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">No definition found</div>
+                      <EmptyState compact title="No definition found" />
                     ) : (
                       <div className="bg-gray-800 rounded p-3 flex-1 overflow-y-auto">
                         <pre className="text-xs font-mono text-gray-300 whitespace-pre-wrap">{tableDefinition}</pre>
@@ -1479,14 +1470,7 @@ export function PartsPage() {
                               <td className="p-1.5 text-right text-gray-300 font-mono">{partition.min_block} - {partition.max_block}</td>
                               <td className="p-1.5 text-right text-red-300 font-mono">
                                 {partition.newest_part
-                                  ? parseServerTime(partition.newest_part).toLocaleString('en-US', {
-                                      month: 'short',
-                                      day: 'numeric',
-                                      hour: '2-digit',
-                                      minute: '2-digit',
-                                      second: '2-digit',
-                                      hour12: false,
-                                    })
+                                  ? formatDateTime(partition.newest_part)
                                   : '-'}
                               </td>
                             </tr>
@@ -1502,9 +1486,9 @@ export function PartsPage() {
                       <div className="flex flex-col flex-1">
                     <h3 className="text-xs font-semibold text-gray-300 mb-2">Sample Data ({sampleData.length} rows)</h3>
                     {sampleDataLoading ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">Loading sample data...</div>
+                      <div className="h-20 flex"><LoadingState label="Loading sample data…" /></div>
                     ) : sampleData.length === 0 ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">No data available</div>
+                      <EmptyState compact title="No data available" />
                     ) : (
                       <div className="bg-gray-800 rounded flex-1 overflow-auto">
                         <table className="w-full text-xs">
@@ -1541,9 +1525,9 @@ export function PartsPage() {
                       <div className="flex flex-col flex-1">
                     <h3 className="text-xs font-semibold text-gray-300 mb-2">MergeTree Index Granules ({mergeTreeIndexData.length}) <span className="text-gray-500 font-normal">(limit 50)</span></h3>
                     {mergeTreeIndexLoading ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">Loading index granules...</div>
+                      <div className="h-20 flex"><LoadingState label="Loading index granules…" /></div>
                     ) : mergeTreeIndexData.length === 0 ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">No index data available</div>
+                      <EmptyState compact title="No index data available" />
                     ) : (
                       <div className="bg-gray-800 rounded flex-1 overflow-auto">
                         <table className="w-full text-xs">
@@ -1583,9 +1567,9 @@ export function PartsPage() {
                       <div className="flex flex-col flex-1">
                     <h3 className="text-xs font-semibold text-gray-300 mb-2">Column Compression ({compressionData.length} columns)</h3>
                     {compressionLoading ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">Loading compression data...</div>
+                      <div className="h-20 flex"><LoadingState label="Loading compression data…" /></div>
                     ) : compressionData.length === 0 ? (
-                      <div className="flex items-center justify-center h-20 text-gray-400">No compression data available</div>
+                      <EmptyState compact title="No compression data available" />
                     ) : (
                       <div className="bg-gray-800 rounded flex-1 overflow-auto">
                         <table className="w-full text-xs">
@@ -1731,9 +1715,9 @@ export function PartsPage() {
 
             <div className="flex-1 overflow-auto p-3">
               {partitionPartsLoading ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
+                <div className="h-32 flex"><LoadingState /></div>
               ) : partitionParts.length === 0 ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">No parts found</div>
+                <EmptyState compact title="No parts found" />
               ) : (
                 <>
                   <div className="grid grid-cols-4 gap-2 mb-4">
@@ -1811,14 +1795,7 @@ export function PartsPage() {
                             <td className="p-2 text-right text-gray-300">{part.min_block_number} - {part.max_block_number}</td>
                             <td className="p-2 text-right text-red-300">
                               {part.modification_time
-                                ? parseServerTime(part.modification_time).toLocaleString('en-US', {
-                                    month: 'short',
-                                    day: 'numeric',
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                    second: '2-digit',
-                                    hour12: false,
-                                  })
+                                ? formatDateTime(part.modification_time)
                                 : '-'}
                             </td>
                           </tr>
@@ -1925,9 +1902,9 @@ export function PartsPage() {
 
             <div className="flex-1 overflow-auto p-3">
               {compressionLoading ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
+                <div className="h-32 flex"><LoadingState /></div>
               ) : compressionDetails.length === 0 ? (
-                <div className="flex items-center justify-center h-32 text-gray-400">No compression data found</div>
+                <EmptyState compact title="No compression data found" />
               ) : (
                 <>
                   <div className="grid grid-cols-4 gap-2 mb-4">
@@ -2049,9 +2026,7 @@ export function PartsPage() {
                 </h3>
 
                 {loadingDatabaseTables ? (
-                  <div className="bg-gray-800 rounded p-8 text-center">
-                    <div className="text-sm text-gray-400">Loading tables...</div>
-                  </div>
+                  <div className="bg-gray-800 rounded p-4"><LoadingState label="Loading tables…" /></div>
                 ) : databaseTables.length > 0 ? (
                   <div className="bg-gray-800 rounded max-h-96 overflow-y-auto">
                     <table className="w-full text-xs">
@@ -2081,7 +2056,7 @@ export function PartsPage() {
                   </div>
                 ) : (
                   <div className="bg-gray-800 rounded p-8 text-center">
-                    <div className="text-sm text-gray-400">No tables found</div>
+                    <EmptyState compact title="No tables found" />
                   </div>
                 )}
               </div>

@@ -2,10 +2,12 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef, ICellRendererParams, FirstDataRenderedEvent } from 'ag-grid-community';
-import { Eye, X, Loader2 } from 'lucide-react';
+import { Eye, X } from 'lucide-react';
 import { fetchSystemViews, fetchViewDefinition, type SystemView } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
-import { parseServerTime } from '../utils/formatters';
+import { formatDateTime } from '../utils/formatters';
+import { LoadingState } from './ui';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -131,15 +133,7 @@ export function ViewsTab({ filters, search }: ViewsTabProps) {
       cellStyle: { color: '#fca5a5' },
       valueFormatter: (params) => {
         if (!params.value) return '-';
-        const date = parseServerTime(params.value);
-        return date.toLocaleString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false,
-        });
+        return formatDateTime(params.value);
       },
     },
   ], [handleViewDetails]);
@@ -160,7 +154,7 @@ export function ViewsTab({ filters, search }: ViewsTabProps) {
 
   return (
     <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-      <AgGridReact<SystemView>
+      <AgGridReact<SystemView> {...GRID_OVERLAYS}
         theme={gridTheme}
         rowData={views}
         columnDefs={columnDefs}
@@ -207,15 +201,7 @@ export function ViewsTab({ filters, search }: ViewsTabProps) {
                   <div className="text-xs text-gray-400">Last Modified</div>
                   <div className="text-sm font-semibold text-red-300 font-mono">
                     {selectedView.metadata_modification_time
-                      ? parseServerTime(selectedView.metadata_modification_time).toLocaleString('en-US', {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          second: '2-digit',
-                          hour12: false,
-                        })
+                      ? formatDateTime(selectedView.metadata_modification_time)
                       : '-'}
                   </div>
                 </div>
@@ -233,10 +219,7 @@ export function ViewsTab({ filters, search }: ViewsTabProps) {
               <div className="bg-gray-800 p-2 rounded">
                 <div className="text-xs text-gray-400 mb-1">Full Definition</div>
                 {definitionLoading ? (
-                  <div className="flex items-center justify-center h-20 text-gray-400">
-                    <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                    Loading definition...
-                  </div>
+                  <div className="h-20 flex"><LoadingState label="Loading definition…" /></div>
                 ) : viewDefinition ? (
                   <pre className="text-xs text-blue-300 font-mono overflow-x-auto whitespace-pre-wrap max-h-[40vh] overflow-y-auto">{viewDefinition}</pre>
                 ) : (

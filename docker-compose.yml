@@ -6,7 +6,11 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - ./queries:/app/queries
+      # The client folder (checks, alert rules, queries, data quality) is read
+      # from the repo; mount it so edits apply without rebuilding the image
+      - ./clienta:/app/clienta
+      # Alerting rules/incidents and notebooks persist here
+      - querydog-data:/app/data
       # Mount querydog.yml from current directory (or QUERYDOG_CONFIG override).
       # create_host_path: false tells Docker to fail if the source file is missing
       # instead of silently materialising an empty directory at that path.
@@ -21,3 +25,6 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  querydog-data:

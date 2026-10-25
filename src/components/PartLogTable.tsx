@@ -5,7 +5,8 @@ import type { ColDef, SortChangedEvent, ICellRendererParams } from 'ag-grid-comm
 import { useQueryStore } from '../stores/queryStore';
 import type { PartLogEntry } from '../types/queryLog';
 import { useGridTheme } from '../hooks/useTheme';
-import { formatBytes, formatNumber, parseServerTime } from '../utils/formatters';
+import { formatBytes, formatNumber, formatDateTime } from '../utils/formatters';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 // Register AG Grid Community modules
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -67,14 +68,7 @@ export function PartLogTable() {
         case 'event_time':
           def.valueFormatter = (params) => {
             if (!params.value) return '';
-            const date = parseServerTime(params.value);
-            return date.toLocaleString('en-US', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: false,
-            });
+            return formatDateTime(params.value, { seconds: false });
           };
           break;
         case 'size_in_bytes':
@@ -134,7 +128,7 @@ export function PartLogTable() {
 
   return (
     <div className="h-full w-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-      <AgGridReact<PartLogEntry>
+      <AgGridReact<PartLogEntry> {...GRID_OVERLAYS}
         theme={gridTheme}
         rowData={partLogEntries}
         columnDefs={columnDefs}

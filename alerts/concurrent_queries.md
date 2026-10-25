@@ -1,1 +1,0 @@
-Compares current active query count against the configured max_concurrent_queries limit per host and flags hosts running above 70 percent of that limit. Useful for spotting queue pressure before queries start getting rejected.

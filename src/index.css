@@ -5,11 +5,29 @@
   box-sizing: border-box;
 }
 
+/* New Cadence brand tokens (newcadence.io): amber mark, deep navy surfaces,
+   Inter Tight for UI text and Sora for display type. */
+:root {
+  --brand-accent: #fbbf24;
+  --brand-surface: #0e0c22;
+  --brand-surface-border: #26224a;
+}
+html.light {
+  --brand-surface: #ffffff;
+  --brand-surface-border: #e5e7eb;
+}
+
 body {
   margin: 0;
-  font-family: 'Sora', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Inter Tight', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Display type (titles, headings) */
+.font-display, h1, h2 {
+  font-family: 'Sora', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: -0.035em;
 }
 
 /* Data table monospace font */
@@ -50,7 +68,7 @@ select {
 
 /* ==================== Light Mode ==================== */
 
-.light {
+html.light {
   /* --- Gray palette: invert dark↔light --- */
   --color-white: #030712;
   --color-gray-50: #0f172a;
@@ -106,35 +124,62 @@ select {
 }
 
 /* Ensure text stays actually white on colored button backgrounds in light mode */
-.light .bg-blue-600,
-.light .bg-blue-500,
-.light .bg-green-700,
-.light .bg-green-600,
-.light .bg-green-500,
-.light .bg-red-700,
-.light .bg-red-600,
-.light .bg-red-500 {
+html.light .bg-blue-600,
+html.light .bg-blue-500,
+html.light .bg-green-700,
+html.light .bg-green-600,
+html.light .bg-green-500,
+html.light .bg-red-700,
+html.light .bg-red-600,
+html.light .bg-red-500 {
   color: #ffffff;
 }
 
 /* Light mode scrollbar */
-.light ::-webkit-scrollbar-track {
+html.light ::-webkit-scrollbar-track {
   background: #f3f4f6;
 }
 
-.light ::-webkit-scrollbar-thumb {
+html.light ::-webkit-scrollbar-thumb {
   background: #9ca3af;
 }
 
-.light ::-webkit-scrollbar-thumb:hover {
+html.light ::-webkit-scrollbar-thumb:hover {
   background: #6b7280;
 }
 
 /* Light mode form elements */
-.light input[type="datetime-local"] {
+html.light input[type="datetime-local"] {
   color-scheme: light;
 }
 
-.light select {
+html.light select {
   color-scheme: light;
+}
+
+/* Horizontal navs scroll on narrow screens without showing a scrollbar */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Recharts draws a light grey (#ccc) hover band behind bar charts by default,
+   which shows as a white block on the dark theme. Match the Observability charts. */
+.recharts-rectangle.recharts-tooltip-cursor:not([fill="transparent"]) {
+  fill: rgba(55, 65, 81, 0.3);
+}
+.recharts-curve.recharts-tooltip-cursor {
+  stroke: rgba(107, 114, 128, 0.6);
+}
+html.light .recharts-rectangle.recharts-tooltip-cursor:not([fill="transparent"]) {
+  fill: rgba(148, 163, 184, 0.2);
+}
+
+/* AG Grid shows its loading overlay over the previous rows while a refresh
+   runs. Its translucent backdrop washes the rows out (badly in light mode), so
+   keep the rows readable and show only the small "Loading…" box. */
+.ag-overlay-loading-wrapper {
+  background-color: transparent;
 }

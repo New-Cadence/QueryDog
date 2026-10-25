@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Network, RefreshCw, Server, GitBranch, Clock, Database, Send } from 'lucide-react';
 import { SystemTable } from '../SystemTable';
+import { ToolbarSlot } from '../ToolbarSlot';
+import { PageTabs } from '../ui';
 import {
   fetchReplicationQueue,
   fetchReplicationQueueColumns,
@@ -29,6 +31,7 @@ type ZookeeperSubTab = 'zookeeper' | 'connection' | 'connection-log';
 
 export function ClusterPage() {
   const [activeTab, setActiveTab] = useState<ClusterTab>('clusters');
+  const [toolbarEl, setToolbarEl] = useState<HTMLDivElement | null>(null);
   const [replicationSubTab, setReplicationSubTab] = useState<ReplicationQueueSubTab>('detailed');
   const [zookeeperSubTab, setZookeeperSubTab] = useState<ZookeeperSubTab>('zookeeper');
 
@@ -55,25 +58,8 @@ export function ClusterPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="bg-gray-900/50 border-b border-gray-700 px-1.5 h-9 flex items-center justify-between shrink-0">
-        <div />
-      </div>
-      <div className="border-b border-gray-700 px-1.5 flex items-center gap-1 shrink-0">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
-              activeTab === id
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            <Icon className="w-3 h-3" />
-            {label}
-          </button>
-        ))}
-      </div>
+      <ToolbarSlot ref={setToolbarEl} />
+      <PageTabs tabs={tabs} active={activeTab} onChange={setActiveTab} />
 
       <div className="flex-1 overflow-hidden px-1.5 pt-3 pb-4 flex flex-col">
         {activeTab === 'replication-queue' && (
@@ -100,6 +86,7 @@ export function ClusterPage() {
                   fetchColumns={fetchReplicationQueueColumns}
                   getRowId={(data) => `${data.database}-${data.table}-${data.replica_name}-${data.position}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                   defaultVisibleFields={['database', 'table', 'replica_name', 'is_leader', 'is_readonly', 'future_parts', 'parts_to_check', 'queue_size', 'last_queue_update_exception']}
                 />
               )}
@@ -108,6 +95,7 @@ export function ClusterPage() {
                   fetchData={fetchReplicationQueueGrouped}
                   getRowId={(data) => `${data.table}-${data.last_exception}-${data.postpone_reason}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
             </div>
@@ -120,6 +108,7 @@ export function ClusterPage() {
             fetchColumns={fetchReplicasColumns}
             getRowId={(data) => `${data.database}-${data.table}-${data.replica_name}`}
             hideHeader
+            toolbarContainer={toolbarEl}
             defaultVisibleFields={['database', 'table', 'replica_name', 'is_leader', 'is_readonly', 'future_parts', 'parts_to_check', 'queue_size', 'inserts_in_queue', 'merges_in_queue', 'last_queue_update_exception']}
           />
         )}
@@ -130,6 +119,7 @@ export function ClusterPage() {
             fetchColumns={fetchClustersColumns}
             getRowId={(data) => `${data.cluster}-${data.shard_num}-${data.replica_num}`}
             hideHeader
+            toolbarContainer={toolbarEl}
             defaultVisibleFields={['cluster', 'shard_num', 'replica_num', 'host_name', 'host_address', 'port', 'shard_weight', 'internal_replication', 'is_local']}
           />
         )}
@@ -140,6 +130,7 @@ export function ClusterPage() {
             fetchColumns={fetchReplicatedFetchesColumns}
             getRowId={(data) => `${data.database}-${data.table}-${data.result_part_name}`}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
 
@@ -149,6 +140,7 @@ export function ClusterPage() {
             fetchColumns={fetchDistributedDdlQueueColumns}
             getRowId={(data) => String(data.entry)}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
 
@@ -158,6 +150,7 @@ export function ClusterPage() {
             fetchColumns={fetchDistributionQueueColumns}
             getRowId={(data) => `${data.database}-${data.table}-${data.data_path}`}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
 
@@ -185,6 +178,7 @@ export function ClusterPage() {
                   fetchColumns={fetchZookeeperColumns}
                   getRowId={(data) => String(data.path)}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
               {zookeeperSubTab === 'connection' && (
@@ -193,6 +187,7 @@ export function ClusterPage() {
                   fetchColumns={fetchZookeeperConnectionColumns}
                   getRowId={(data) => `${data.index}-${data.host}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
               {zookeeperSubTab === 'connection-log' && (
@@ -201,6 +196,7 @@ export function ClusterPage() {
                   fetchColumns={fetchZookeeperConnectionLogColumns}
                   getRowId={(data) => `${data.event_time}-${data.type}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
             </div>

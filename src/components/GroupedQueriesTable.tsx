@@ -2,11 +2,13 @@ import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef, SortChangedEvent, ICellRendererParams, CellStyle } from 'ag-grid-community';
-import { Loader2, Copy, Check, X, Eye, ExternalLink, List, Pin } from 'lucide-react';
+import { Copy, Check, X, Eye, ExternalLink, List, Pin } from 'lucide-react';
 import { useQueryStore } from '../stores/queryStore';
 import { fetchGroupedQueryLog, type GroupedQueryEntry } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
 import { formatBytes, formatNumber, formatDuration, formatDateTime } from '../utils/formatters';
+import { LoadingState } from './ui';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 // Register AG Grid Community modules
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -141,7 +143,7 @@ export function GroupedQueriesTable() {
     {
       headerName: 'Last Seen',
       field: 'last_seen',
-      width: 150,
+      width: 175,
       sortable: true,
       valueFormatter: (params) => formatDateTime(params.value),
     },
@@ -259,7 +261,7 @@ export function GroupedQueriesTable() {
     {
       headerName: 'First Seen',
       field: 'first_seen',
-      width: 130,
+      width: 175,
       sortable: true,
       valueFormatter: (params) => formatDateTime(params.value),
       cellStyle: { color: '#fca5a5' } as CellStyle,
@@ -282,9 +284,7 @@ export function GroupedQueriesTable() {
 
   if (groupedLoading) {
     return (
-      <div className="h-full flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
-      </div>
+      <LoadingState label="Loading grouped queries…" />
     );
   }
 
@@ -306,7 +306,7 @@ export function GroupedQueriesTable() {
         </div>
       )}
       <div className="flex-1 min-h-0">
-        <AgGridReact
+        <AgGridReact {...GRID_OVERLAYS}
           theme={gridTheme}
           rowData={groupedEntries}
           columnDefs={columnDefs}

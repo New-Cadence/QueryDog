@@ -52,12 +52,12 @@ export function PartLogPage() {
       </div>
 
       {/* Timeline Chart */}
-      <div className="px-1.5 pt-3 pb-2 shrink-0">
+      <div className="px-1.5 pt-3 shrink-0">
         <PartLogTimelineChart />
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-700 mx-4 flex items-center gap-1 shrink-0">
+      <div className="border-b border-gray-700 px-1.5 pt-3 flex items-center gap-1 shrink-0">
         {tabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}

@@ -1,1 +1,0 @@
-Compares each user's queries-per-minute over the last 5 minutes against the prior hour baseline and flags users running at more than 3x their normal rate. Useful for detecting runaway clients or dashboard storms.

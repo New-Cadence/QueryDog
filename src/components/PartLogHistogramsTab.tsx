@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useQueryStore } from '../stores/queryStore';
 import { fetchPartLogHistogram } from '../services/api';
 import type { HistogramData } from '../types/queryLog';
+import { LoadingState, EmptyState } from './ui';
 
 const COLORS = ['#7dd3fc', '#38bdf8', '#60a5fa', '#93c5fd', '#a5d8ff', '#74c0fc', '#4dabf7', '#339af0', '#228be6', '#1c7ed6'];
 
@@ -29,7 +30,7 @@ function HistogramCard({ field, label, data, loading, onFilterClick }: Histogram
     return (
       <div className="bg-gray-900 border border-gray-700 rounded p-3 h-[300px]">
         <h3 className="text-xs font-semibold text-gray-400 mb-2">{label}</h3>
-        <div className="text-gray-500 text-xs">Loading...</div>
+        <div className="h-[250px] flex"><LoadingState /></div>
       </div>
     );
   }
@@ -38,7 +39,7 @@ function HistogramCard({ field, label, data, loading, onFilterClick }: Histogram
     return (
       <div className="bg-gray-900 border border-gray-700 rounded p-3 h-[300px]">
         <h3 className="text-xs font-semibold text-gray-400 mb-2">{label}</h3>
-        <div className="text-gray-500 text-xs">No data</div>
+        <EmptyState compact title="No data" />
       </div>
     );
   }

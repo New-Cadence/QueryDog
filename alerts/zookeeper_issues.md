@@ -1,1 +1,0 @@
-Reports ZooKeeper, Keeper, and replication-related event counters since server start, with a per-second rate based on uptime. Highlights hardware exceptions, data loss events, and replicas diverging after merges or mutations.

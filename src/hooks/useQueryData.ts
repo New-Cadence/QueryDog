@@ -18,7 +18,8 @@ import {
 } from '../services/api';
 import { createColumnsFromMetadata } from '../types/queryLog';
 
-export function useQueryData(enabled: boolean = true) {
+// envKey identifies the connected environment; column metadata reloads when it changes
+export function useQueryData(enabled: boolean = true, envKey: number | null = null) {
   const {
     timeRange,
     bucketSize,
@@ -30,6 +31,8 @@ export function useQueryData(enabled: boolean = true) {
     pageSize,
     currentPage,
     chartType,
+    chartMetric,
+    chartAggregation,
     partLogSortField,
     partLogSortOrder,
     partLogFieldFilters,
@@ -41,6 +44,7 @@ export function useQueryData(enabled: boolean = true) {
     setTotalCount,
     setLoading,
     setError,
+    setQueryLogMissing,
     setColumns,
     setPartLogEntries,
     setPartLogTimeSeries,
@@ -51,40 +55,36 @@ export function useQueryData(enabled: boolean = true) {
     setPartLogColumns,
   } = useQueryStore();
 
-  const columnsLoadedRef = useRef(false);
-  const partLogColumnsLoadedRef = useRef(false);
   const queryRequestIdRef = useRef(0);
   const partLogRequestIdRef = useRef(0);
 
-  // Load column metadata once on startup
+  // Load column metadata for each connected environment. A server without the
+  // table returns no columns; keep the current set rather than blanking the grid.
   useEffect(() => {
-    if (columnsLoadedRef.current) return;
-    columnsLoadedRef.current = true;
-
+    if (envKey === null) return;
+    let cancelled = false;
     fetchColumnMetadata()
       .then((metadata) => {
-        const columns = createColumnsFromMetadata(metadata, 'query_log');
-        setColumns(columns);
+        if (!cancelled && metadata.length) setColumns(createColumnsFromMetadata(metadata, 'query_log'));
       })
       .catch((err) => {
         console.error('Failed to load column metadata:', err);
       });
-  }, [setColumns]);
+    return () => { cancelled = true; };
+  }, [setColumns, envKey]);
 
-  // Load part_log column metadata once on startup
   useEffect(() => {
-    if (partLogColumnsLoadedRef.current) return;
-    partLogColumnsLoadedRef.current = true;
-
+    if (envKey === null) return;
+    let cancelled = false;
     fetchPartLogColumnMetadata()
       .then((metadata) => {
-        const columns = createColumnsFromMetadata(metadata, 'part_log');
-        setPartLogColumns(columns);
+        if (!cancelled && metadata.length) setPartLogColumns(createColumnsFromMetadata(metadata, 'part_log'));
       })
       .catch((err) => {
         console.error('Failed to load part_log column metadata:', err);
       });
-  }, [setPartLogColumns]);
+    return () => { cancelled = true; };
+  }, [setPartLogColumns, envKey]);
 
   const loadData = useCallback(async () => {
     const requestId = ++queryRequestIdRef.current;
@@ -110,15 +110,17 @@ export function useQueryData(enabled: boolean = true) {
       const results = await Promise.allSettled([
         fetchQueryLog(currentTimeRange, search, sortField, sortOrder, fieldFilters, rangeFilters, pageSize, offset, bucketSize),
         fetchTimeSeries(currentTimeRange, bucketSize, search, fieldFilters, rangeFilters),
-        fetchStackedTimeSeries(currentTimeRange, bucketSize, search, fieldFilters, rangeFilters),
+        fetchStackedTimeSeries(currentTimeRange, bucketSize, search, fieldFilters, rangeFilters, state.chartMetric, state.chartAggregation),
         fetchTotalCount(currentTimeRange, search, fieldFilters, rangeFilters, bucketSize),
       ]);
 
       // Process each result individually - set data if successful, show error if failed
       let hasAnyData = false;
-      let errors: string[] = [];
+      const errors: string[] = [];
 
       if (requestId !== queryRequestIdRef.current) return;
+
+      setQueryLogMissing(results.some((r) => r.status === 'rejected' && r.reason?.type === 'not_found'));
 
       if (results[0].status === 'fulfilled') {
         setEntries(results[0].value);
@@ -170,7 +172,7 @@ export function useQueryData(enabled: boolean = true) {
         } else if (criticalError?.type === 'permission') {
           setError('Access denied: You do not have permission to access system.query_log table');
         } else if (criticalError?.type === 'not_found') {
-          setError('Table system.query_log does not exist or is not accessible on this ClickHouse instance');
+          // Missing system.query_log: the Queries page shows it inline (queryLogMissing)
         } else if (!hasAnyData) {
           // Check if this is a connection or server error
           const firstError = errors[0];
@@ -216,6 +218,7 @@ export function useQueryData(enabled: boolean = true) {
     setTotalCount,
     setLoading,
     setError,
+    setQueryLogMissing,
   ]);
 
   const loadPartLogData = useCallback(async () => {
@@ -238,7 +241,7 @@ export function useQueryData(enabled: boolean = true) {
 
       // Process each result individually - set data if successful, show error if failed
       let hasAnyData = false;
-      let errors: string[] = [];
+      const errors: string[] = [];
 
       if (requestId !== partLogRequestIdRef.current) return;
 
@@ -348,6 +351,20 @@ export function useQueryData(enabled: boolean = true) {
     if (!enabled) return;
     loadData();
   }, [loadData, enabled]);
+
+  // Switching the metric or aggregation only needs the per-kind series again
+  const firstMetric = useRef(true);
+  useEffect(() => {
+    if (firstMetric.current) { firstMetric.current = false; return; }
+    if (!enabled) return;
+    let cancelled = false;
+    const state = useQueryStore.getState();
+    fetchStackedTimeSeries(state.timeRange, bucketSize, search, fieldFilters, rangeFilters, chartMetric, chartAggregation)
+      .then(data => { if (!cancelled) setStackedTimeSeries(data); })
+      .catch(err => console.error('Failed to load stacked time series:', err));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartMetric, chartAggregation]);
 
   // Load part log data on startup
   useEffect(() => {

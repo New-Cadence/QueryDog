@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Filter, X, ChevronDown, ChevronRight } from 'lucide-react';
+import { LoadingState } from './ui';
 
 interface FilterConfig {
   field: string;
@@ -15,6 +16,9 @@ interface ActivityFilterPanelProps {
   filterableFields: FilterConfig[];
 }
 
+// "Filters" dropdown for server-filtered screens: values are loaded on demand
+// from a distinct-values endpoint and re-fetched each time the panel opens, so
+// they follow the current time range and data.
 export function ActivityFilterPanel({
   filters,
   onFilterChange,
@@ -29,6 +33,9 @@ export function ActivityFilterPanel({
   const [loadingField, setLoadingField] = useState<string | null>(null);
 
   const activeFilterCount = Object.values(filters).filter((v) => v.length > 0).length;
+  const knownFields = new Set(filterableFields.map((f) => f.field));
+  // Filters applied from elsewhere (e.g. drilling into a partition) without a picker here
+  const otherFilters = Object.entries(filters).filter(([field, values]) => !knownFields.has(field) && values.length > 0);
 
   const loadFieldValues = async (field: string) => {
     if (fieldValues[field]) return;
@@ -39,9 +46,18 @@ export function ActivityFilterPanel({
       setFieldValues((prev) => ({ ...prev, [field]: values }));
     } catch (error) {
       console.error('Failed to load field values:', error);
+      setFieldValues((prev) => ({ ...prev, [field]: [] }));
     } finally {
       setLoadingField(null);
     }
+  };
+
+  const togglePanel = () => {
+    if (!isOpen) {
+      setFieldValues({});
+      setExpandedField(null);
+    }
+    setIsOpen(!isOpen);
   };
 
   const toggleField = (field: string) => {
@@ -62,15 +78,10 @@ export function ActivityFilterPanel({
     }
   };
 
-  // Reset field values when filters change significantly
-  useEffect(() => {
-    setFieldValues({});
-  }, []);
-
   return (
     <div className="relative">
       <button
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={togglePanel}
         className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
           activeFilterCount > 0 ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
         }`}
@@ -103,10 +114,25 @@ export function ActivityFilterPanel({
               </div>
             </div>
             <div className="max-h-96 overflow-y-auto">
+              {otherFilters.map(([field, values]) => (
+                <div key={field} className="flex items-center justify-between gap-2 p-2 border-b border-gray-700/50">
+                  <div className="min-w-0">
+                    <div className="text-xs text-gray-300">{field}</div>
+                    <div className="text-[10px] text-gray-500 font-mono truncate max-w-[220px]" title={values.join(', ')}>
+                      {values.join(', ')}
+                    </div>
+                  </div>
+                  <button onClick={() => onClearFilter(field)} className="text-xs text-red-400 hover:text-red-300 shrink-0">
+                    Clear
+                  </button>
+                </div>
+              ))}
               {filterableFields.map(({ field, label }) => {
                 const selectedValues = filters[field] || [];
                 const isExpanded = expandedField === field;
-                const values = fieldValues[field] || [];
+                const loaded = fieldValues[field] || [];
+                // Keep selected values listed even if they are no longer in the data
+                const values = [...selectedValues.filter((v) => !loaded.includes(v)), ...loaded];
 
                 return (
                   <div key={field} className="border-b border-gray-700/50 last:border-0">
@@ -132,7 +158,7 @@ export function ActivityFilterPanel({
                     {isExpanded && (
                       <div className="px-2 pb-2">
                         {loadingField === field ? (
-                          <div className="text-xs text-gray-400 py-2 text-center">Loading...</div>
+                          <LoadingState compact />
                         ) : values.length === 0 ? (
                           <div className="text-xs text-gray-400 py-2 text-center">No values</div>
                         ) : (

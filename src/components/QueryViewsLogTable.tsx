@@ -7,6 +7,7 @@ import { useQueryStore } from '../stores/queryStore';
 import { fetchQueryViewsLog, type QueryViewsLogEntry } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
 import { formatBytes, formatNumber, formatDuration, formatDateTime } from '../utils/formatters';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -51,7 +52,7 @@ function numericComparator(valueA: unknown, valueB: unknown): number {
 
 export function QueryViewsLogTable() {
   const gridTheme = useGridTheme();
-  const { search, fieldFilters, globalRefreshTrigger } = useQueryStore();
+  const { timeRange, search, fieldFilters, globalRefreshTrigger } = useQueryStore();
   const [data, setData] = useState<QueryViewsLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [sortField, setSortField] = useState('event_time');
@@ -59,11 +60,6 @@ export function QueryViewsLogTable() {
 
   // Modal state
   const [selectedEntry, setSelectedEntry] = useState<QueryViewsLogEntry | null>(null);
-
-  // Get latest time range from store
-  const getLatestTimeRange = useCallback(() => {
-    return useQueryStore.getState().timeRange;
-  }, []);
 
   const scopedFilters = useMemo(() => {
     const result: Record<string, string[]> = {};
@@ -78,8 +74,7 @@ export function QueryViewsLogTable() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const currentTimeRange = getLatestTimeRange();
-      const entries = await fetchQueryViewsLog(currentTimeRange, sortField, sortOrder, scopedFilters, search);
+      const entries = await fetchQueryViewsLog(timeRange, sortField, sortOrder, scopedFilters, search);
       setData(entries);
     } catch (error) {
       console.error('Failed to fetch query views log:', error);
@@ -87,7 +82,7 @@ export function QueryViewsLogTable() {
     } finally {
       setLoading(false);
     }
-  }, [sortField, sortOrder, scopedFilters, search, getLatestTimeRange]);
+  }, [timeRange, sortField, sortOrder, scopedFilters, search]);
 
   useEffect(() => {
     loadData();
@@ -137,7 +132,7 @@ export function QueryViewsLogTable() {
     {
       headerName: 'Time',
       field: 'event_time',
-      width: 140,
+      width: 175,
       sortable: true,
       sort: 'desc',
       valueFormatter: (params) => formatDateTime(params.value),
@@ -233,7 +228,7 @@ export function QueryViewsLogTable() {
     <div className="h-full flex flex-col">
       {/* Table */}
       <div className="flex-1 bg-gray-900 border border-gray-700 rounded overflow-hidden">
-        <AgGridReact<QueryViewsLogEntry>
+        <AgGridReact<QueryViewsLogEntry> {...GRID_OVERLAYS}
           theme={gridTheme}
           rowData={data}
           columnDefs={columnDefs}

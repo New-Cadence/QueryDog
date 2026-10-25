@@ -1,0 +1,165 @@
+# Alert rules for the checks in ../monitoring, keyed by check name (file name without .sql).
+# Loaded read-only by Convoy: change them here and redeploy.
+# Severity, description and category come from the `-- severity:`, `-- description:`
+# and `-- category:` header at the top of each check's .sql file, not from here.
+#   operator    > | >= | = | <  compared with threshold against the check's row count
+#   threshold   row count the operator compares against (0 = fire on any rows)
+#   forMinutes  how long the condition must hold before an incident opens
+#   channels    optional list of notification channel names (Settings > Notification channels)
+rules:
+  active_parts:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  async_insert_errors:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  concurrent_queries:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  detached_parts:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  detached_parts_present:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  dictionary_load_failures:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  disk_space:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  disk_space_low:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  distributed_insert_queue:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  distribution_queue_buildup:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  failed_dictionaries:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  failed_mutations:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  failed_queries_by_user:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  high_replication_lag:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  largest_tables:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  long_running_queries:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  long_running_queries_now:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  memory_intensive_queries:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  memory_pressure:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  merge_backlog:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  oom_kills_last_hour:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  query_exceptions_last_hour:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  query_log_errors:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  query_rate_spike:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  readonly_or_expired_replicas:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  recent_errors:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  rejected_delayed_inserts:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  replication_health:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  server_warnings:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  slow_merges:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  slow_queries:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  slow_queries_over_30s:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  stuck_mutations:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  stuck_replication_queue:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  table_size_growth_24h:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  text_log_errors:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  too_many_parts_per_partition:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  zookeeper_issues:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0
+  zookeeper_or_keeper_errors:
+    operator: '>'
+    threshold: 0
+    forMinutes: 0

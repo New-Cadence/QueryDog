@@ -1,7 +1,7 @@
 import express from 'express';
 import tls from 'tls';
 import cors from 'cors';
-import { createClient } from '@clickhouse/client';
+import { ClickHouseLogLevel, createClient } from '@clickhouse/client';
 import dotenv from 'dotenv';
 import yaml from 'js-yaml';
 import path from 'path';
@@ -11,6 +11,14 @@ import figlet from 'figlet';
 import https from 'https';
 import http from 'http';
 import dns from 'dns';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { recordCheckRun, runStats, runLog, clearRuns } from './db.js';
+import { startScheduler } from './scheduler.js';
+import { registerExtensions } from './extensions/index.js';
+import { isBlockedStatement, leadingKeyword } from './sqlGuard.js';
+import { checkMeta, durationLimits, durationStatus, parseSqlHeader, readSqlHeader } from './sqlHeader.js';
+import { createAuth } from './auth.js';
+import { validateConfig } from './configValidation.js';
 
 // Force IPv4 to avoid Docker Desktop networking issues
 dns.setDefaultResultOrder('ipv4first');
@@ -23,6 +31,24 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Login (querydog.yml `auth:`); a no-op until users are configured
+const auth = createAuth({
+  readAuthConfig: () => {
+    const yamlPath = findConfigPath();
+    try { return (yamlPath && yaml.load(fs.readFileSync(yamlPath, 'utf-8')))?.auth || null; } catch { return null; }
+  },
+});
+app.use(auth.middleware);
+auth.register(app);
+app.use((req, res, next) => {
+  const name = req.get('X-QueryDog-Environment');
+  if (!name) return next();
+  const env = environments.find(e => e.name === name);
+  if (!env) return res.status(400).json({ error: `Unknown environment "${name}"` });
+  const trigger = req.get('X-QueryDog-Trigger') === 'scheduler' ? 'scheduler' : 'manual';
+  requestEnv.run({ env, client: clientForEnv(env), trigger }, next);
+});
 
 // Serve static files from the dist folder in production
 app.use(express.static(path.join(__dirname, '../dist')));
@@ -61,32 +87,44 @@ function findConfigPath() {
   return null;
 }
 
+// Whether an environment is ClickHouse Cloud or self-managed open source.
+// Explicit `deployment: cloud | oss` in querydog.yml wins; otherwise infer from the host.
+function resolveDeployment(env) {
+  if (env.deployment === 'cloud' || env.deployment === 'oss') return env.deployment;
+  return /\.clickhouse\.cloud$/i.test(String(env.host || '').trim()) ? 'cloud' : 'oss';
+}
+
+// A querydog.yml that fails validation, with every problem found
+class ConfigError extends Error {
+  constructor(file, problems) {
+    super(`Invalid ${file}:\n${problems.map(p => `  - ${p}`).join('\n')}`);
+    this.problems = problems;
+  }
+}
+
 // Load environments from querydog.yml, falling back to .env
 function loadConfig(options = {}) {
   const { quiet = false } = options;
   const yamlPath = findConfigPath();
 
   if (yamlPath) {
-    const raw = yaml.load(fs.readFileSync(yamlPath, 'utf-8'));
+    let raw;
+    try {
+      raw = yaml.load(fs.readFileSync(yamlPath, 'utf-8'));
+    } catch (e) {
+      throw new ConfigError(yamlPath, [`not valid YAML: ${e.message}`]);
+    }
+    const problems = validateConfig(raw);
+    if (problems.length) throw new ConfigError(yamlPath, problems);
     if (raw && raw.environments && raw.environments.length > 0) {
       loadedConfigPath = yamlPath;
       if (!quiet) {
         console.log(`Loaded ${raw.environments.length} environment(s) from ${yamlPath}`);
       }
-      return raw.environments.map(env => ({
-        name: env.name || 'Default',
-        host: env.host,
-        port: env.port || (env.secure ? 8443 : 8123),
-        user: env.user || 'default',
-        password: env.password || '',
-        database: env.database || 'default',
-        secure: env.secure || false,
-        tls_reject_unauthorized: env.tls_reject_unauthorized !== false,
-        cluster: env.cluster || null,
-        queries_folder: env.queries_folder || 'queries',
-        http_headers: env.http_headers || {},
-        _embeddedId: env._embeddedId || null,
-      }));
+      // Organisation shown in Database Connections: the top-level
+      // organisation_name, unless an environment sets its own
+      const text = v => (typeof v === 'string' && v.trim() ? v.trim() : null);
+      const organisationName = text(raw.organisation_name);
       return raw.environments.map((env, i) => {
         const name = env.name || 'Default';
         if (!env.host || !String(env.host).trim()) {
@@ -97,6 +135,10 @@ function loadConfig(options = {}) {
         }
         return {
           name,
+          // Optional labels for display: who the environment belongs to and which one it is
+          organisation: text(env.organisation_name) ?? text(env.organisation) ?? organisationName,
+          organisation_override: text(env.organisation_name) ?? text(env.organisation),
+          environment: typeof env.environment === 'string' && env.environment.trim() ? env.environment.trim() : null,
           host: String(env.host).trim(),
           port: env.port || (env.secure ? 8443 : 8123),
           user: env.user || 'default',
@@ -104,8 +146,23 @@ function loadConfig(options = {}) {
           database: env.database || 'default',
           secure: env.secure || false,
           tls_reject_unauthorized: env.tls_reject_unauthorized !== false,
-          cluster: env.cluster || null,
-          queries_folder: env.queries_folder || 'queries',
+          // Resolved cluster name, or null for a single server. cluster: true uses
+          // cluster_name (default "default", the cluster every Cloud service has);
+          // a string is the older way of naming the cluster.
+          cluster: typeof env.cluster === 'string' ? env.cluster.trim() : env.cluster === true ? (env.cluster_name || 'default').trim() : null,
+          cluster_setting: typeof env.cluster === 'string' ? true : env.cluster === true || env.cluster === false ? env.cluster : null,
+          cluster_name: typeof env.cluster === 'string' ? env.cluster.trim() : env.cluster_name || null,
+          is_default: env.default === true,
+          queries_folder: env.queries_folder || null,
+          http_headers: env.http_headers || {},
+          deployment: resolveDeployment(env),
+          // What the config file says (null when inferred), so saving doesn't pin an inferred value
+          deployment_setting: env.deployment === 'cloud' || env.deployment === 'oss' ? env.deployment : null,
+          // Optional ClickHouse Cloud API credentials (key_id, key_secret, organization_id, service_id) for billing data
+          cloud_api: env.cloud_api || null,
+          // Per-environment schedule (read by server/scheduler.js), kept so saving doesn't drop it
+          scheduler: env.scheduler ?? null,
+          _embeddedId: env._embeddedId || null,
         };
       });
     }
@@ -127,21 +184,126 @@ function loadConfig(options = {}) {
     secure: process.env.CLICKHOUSE_SECURE === '1',
     tls_reject_unauthorized: process.env.CLICKHOUSE_TLS_REJECT_UNAUTHORIZED !== '0',
     cluster: process.env.CLICKHOUSE_CLUSTER || null,
-    queries_folder: process.env.QUERYDOG_QUERIES_FOLDER || 'queries',
+    queries_folder: process.env.QUERYDOG_QUERIES_FOLDER || null,
+    deployment: resolveDeployment({ host: process.env.CLICKHOUSE_HOST, deployment: process.env.CLICKHOUSE_DEPLOYMENT }),
   }];
 }
 
-const environments = loadConfig();
+let environments;
+try {
+  environments = loadConfig();
+} catch (e) {
+  // Refuse to start on a broken config, listing what to fix
+  console.error(`\n${e.message}\n`);
+  process.exit(1);
+}
+
+// ==================== CLIENT CONFIG FOLDER ====================
+// Each client's checks and queries live in one folder (e.g. clienta/) with a
+// sub-folder per class. querydog.yml picks the client and can point any class
+// elsewhere:
+//   client: clienta
+//   folders:
+//     monitoring: monitoring     # relative to the client folder, or absolute
+// QUERYDOG_CLIENT overrides `client`.
+const CLIENT_FOLDER_KINDS = ['monitoring', 'alerts', 'performance', 'dataquality'];
+const DEFAULT_CLIENT = 'clienta';
+let clientConfig = { client: DEFAULT_CLIENT, folders: {} };
+
+function loadClientConfig() {
+  const yamlPath = findConfigPath();
+  let raw = {};
+  try {
+    raw = (yamlPath && yaml.load(fs.readFileSync(yamlPath, 'utf-8'))) || {};
+  } catch (e) {
+    console.error(`Could not read client settings from ${yamlPath}:`, e.message);
+  }
+  const folders = {};
+  if (raw.folders && typeof raw.folders === 'object') {
+    for (const kind of CLIENT_FOLDER_KINDS) {
+      if (typeof raw.folders[kind] === 'string' && raw.folders[kind].trim()) folders[kind] = raw.folders[kind].trim();
+    }
+  }
+  clientConfig = { client: process.env.QUERYDOG_CLIENT || (typeof raw.client === 'string' && raw.client.trim()) || DEFAULT_CLIENT, folders };
+}
+loadClientConfig();
+
+const resolveFromCwd = (p) => (path.isAbsolute(p) ? p : path.join(process.cwd(), p));
+const getClientDir = () => resolveFromCwd(clientConfig.client);
+function getClientFolder(kind) {
+  const configured = clientConfig.folders[kind] || kind;
+  return path.isAbsolute(configured) ? configured : path.join(getClientDir(), configured);
+}
 
 // Active environment state
 let activeEnvIndex = 0;
-let client = null;
+let activeClient = null;
 let CLICKHOUSE_CLUSTER = null;
-let QUERIES_FOLDER = 'queries';
+
+// A request can name an environment with X-QueryDog-Environment (the backend
+// scheduler does, to run checks against every environment). It then uses that
+// environment's client for its whole lifetime, while the UI keeps its own
+// selection. Without the header, requests use the active environment.
+const requestEnv = new AsyncLocalStorage();
+const envClients = new Map(); // connection key -> client for header-selected environments
+const scopedEnv = () => requestEnv.getStore()?.env ?? environments[activeEnvIndex];
+const requestTrigger = () => requestEnv.getStore()?.trigger ?? 'manual';
+// Failures where the request never reached ClickHouse, so retrying can't run
+// a statement twice: connect timeouts / refusals and TLS handshakes that never finished
+const CONNECT_FAILURE_RE = /ETIMEDOUT|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ECONNECTTIMEOUT|Connection timed out after|socket disconnected before secure TLS connection/i;
+const isConnectFailure = (err) => CONNECT_FAILURE_RE.test(`${err?.code ?? ''} ${err?.message ?? ''}`);
+const RETRIED_METHODS = new Set(['query', 'command', 'exec']);
+
+// `client` follows the request's environment; every route uses it unchanged.
+// Queries that fail to connect are retried once.
+const client = new Proxy({}, {
+  get(_, prop) {
+    const target = requestEnv.getStore()?.client ?? activeClient;
+    const value = target[prop];
+    if (typeof value !== 'function') return value;
+    if (!RETRIED_METHODS.has(prop)) return value.bind(target);
+    return async (...args) => {
+      try {
+        return await value.apply(target, args);
+      } catch (err) {
+        if (!isConnectFailure(err)) throw err;
+        console.warn(`ClickHouse connection failed (${err.code || err.message}); retrying once`);
+        return value.apply(target, args);
+      }
+    };
+  },
+});
+
+// Bound how long opening a connection can take. ClickHouse Cloud hostnames
+// resolve to several addresses: autoSelectFamily tries the next one when an
+// address doesn't answer within CONNECT_ATTEMPT_MS, and the whole connect is
+// abandoned after CONNECT_TIMEOUT_MS instead of the OS default (~75s).
+const CONNECT_ATTEMPT_MS = 2500;
+const CONNECT_TIMEOUT_MS = 10000;
+function limitConnect(agent) {
+  const create = agent.createConnection.bind(agent);
+  agent.createConnection = (options, callback) => {
+    const socket = create({ ...options, autoSelectFamily: true, autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_MS }, callback);
+    const timer = setTimeout(() => {
+      socket.destroy(Object.assign(new Error(`Connection timed out after ${CONNECT_TIMEOUT_MS / 1000}s`), { code: 'ECONNECTTIMEOUT' }));
+    }, CONNECT_TIMEOUT_MS);
+    const done = () => clearTimeout(timer);
+    for (const event of ['connect', 'secureConnect', 'error', 'close']) socket.once(event, done);
+    return socket;
+  };
+  return agent;
+}
+
+function clientForEnv(env) {
+  const key = JSON.stringify([env.host, env.port, env.user, env.password, env.database, env.secure, env.http_headers]);
+  if (!envClients.has(key)) envClients.set(key, createClientForEnv(env));
+  return envClients.get(key);
+}
+let QUERIES_FOLDER = null;
 
 function createClientForEnv(env) {
   const protocol = env.secure ? 'https' : 'http';
-  const agent = env.secure
+  const agent = limitConnect(env.secure
     ? new https.Agent({
         family: 4,
         keepAlive: true,
@@ -156,7 +318,7 @@ function createClientForEnv(env) {
           maxVersion: 'TLSv1.3',
         }),
       })
-    : new http.Agent({ family: 4, keepAlive: true, keepAliveMsecs: 10000, timeout: 60000, maxSockets: 5 });
+    : new http.Agent({ family: 4, keepAlive: true, keepAliveMsecs: 10000, timeout: 60000, maxSockets: 5 }));
 
   return createClient({
     url: `${protocol}://${env.host}:${env.port}`,
@@ -167,6 +329,10 @@ function createClientForEnv(env) {
     http_agent: agent,
     clickhouse_settings: {
       max_execution_time: 0,
+      // Progress headers keep long queries' connections alive through load
+      // balancers' idle timeouts (and silence the client's startup warning)
+      send_progress_in_http_headers: 1,
+      http_headers_progress_interval_ms: '110000',
       // Emit and parse every DateTime in UTC, whatever timezone the ClickHouse
       // server runs in. Results otherwise carry the server's wall clock with no
       // zone attached, and the browser reads them as its own local time, so one
@@ -176,6 +342,9 @@ function createClientForEnv(env) {
     keep_alive: { enabled: false },  // Disabled - chproxy blocks ping requests
     tls: env.secure ? { rejectUnauthorized: env.tls_reject_unauthorized } : undefined,
     http_headers: env.http_headers || undefined,
+    // The client logs every failed request with its full arguments; errors
+    // reach the callers anyway, which log one line each
+    log: { level: ClickHouseLogLevel.OFF },
   });
 }
 
@@ -185,20 +354,30 @@ function switchEnvironment(index) {
   const protocol = env.secure ? 'https' : 'http';
 
   // Close previous client
-  if (client) {
-    client.close().catch(() => {});
+  if (activeClient) {
+    activeClient.close().catch(() => {});
   }
 
   activeEnvIndex = index;
-  client = createClientForEnv(env);
+  activeClient = createClientForEnv(env);
   CLICKHOUSE_CLUSTER = env.cluster;
-  QUERIES_FOLDER = env.queries_folder || 'queries';
+  QUERIES_FOLDER = env.queries_folder || null;
 
   console.log(`Switched to environment: "${env.name}" - ${protocol}://${env.host}:${env.port} as '${env.user}' on '${env.database}'`);
 }
 
-// Initialize first environment
-switchEnvironment(0);
+// Start on the environment marked `default: true` in querydog.yml, else the
+// first one. QUERYDOG_DEFAULT_ENVIRONMENT (an environment name) overrides it.
+function defaultEnvironmentIndex() {
+  const wanted = process.env.QUERYDOG_DEFAULT_ENVIRONMENT;
+  if (wanted) {
+    const index = environments.findIndex(e => e.name === wanted);
+    if (index !== -1) return index;
+    console.warn(`QUERYDOG_DEFAULT_ENVIRONMENT "${wanted}" is not in querydog.yml`);
+  }
+  return Math.max(environments.findIndex(e => e.is_default), 0);
+}
+switchEnvironment(defaultEnvironmentIndex());
 
 // Helper to check connection with timeout (6 seconds)
 // Uses SELECT 1 instead of ping because chproxy blocks ping requests
@@ -212,50 +391,34 @@ async function pingWithTimeout(timeoutMs = CONNECTION_TIMEOUT_MS) {
   ]);
 }
 
-const getQueriesPath = () => path.isAbsolute(QUERIES_FOLDER) ? QUERIES_FOLDER : path.join(process.cwd(), QUERIES_FOLDER);
+// An environment's queries_folder overrides the client's performance folder.
+// 'queries' was the old default for every environment, so it is ignored.
+const getQueriesPath = () => (QUERIES_FOLDER && QUERIES_FOLDER !== 'queries' ? resolveFromCwd(QUERIES_FOLDER) : getClientFolder('performance'));
 
-// ==================== ALERTS RUN-LOG STORE (in-memory) ====================
-// Process-local — loses history on container restart. Enough for the live
-// stats the UI shows (Last Run / Avg Time / Runs). A persistent backend can
-// swap these out without changing the call sites.
-const _alertRuns = new Map(); // filename -> [{ runTime, duration, rowCount, ... }]
+// ==================== RUN HISTORY ====================
+// Every run of a check, manual or scheduled, is stored in the Convoy
+// database with its environment (server/db.js). Grids show the runs of the
+// environment the request is for.
+const RUN_KIND = { alert: 'monitoring', query: 'performance' };
 function recordRun(type, filename, entry) {
-  if (type !== 'alert' || !filename) return;
-  const list = _alertRuns.get(filename) || [];
-  list.unshift(entry);
-  if (list.length > 100) list.length = 100;
-  _alertRuns.set(filename, list);
-}
-function _aggregateOne(list) {
-  if (!list || list.length === 0) return null;
-  const durations = list.map(e => e.duration).filter(n => Number.isFinite(n));
-  const sum = durations.reduce((a, b) => a + b, 0);
-  return {
-    runCount: list.length,
-    lastRunTime: list[0].runTime,
-    lastRowCount: list[0].rowCount,
-    lastDuration: list[0].duration,
-    avgRunTime: durations.length ? Math.round(sum / durations.length) : null,
-    fastestRunTime: durations.length ? Math.min(...durations) : null,
-    slowestRunTime: durations.length ? Math.max(...durations) : null,
-  };
+  if (!filename || !RUN_KIND[type]) return;
+  recordCheckRun({
+    kind: RUN_KIND[type], checkId: filename, environment: scopedEnv().name, trigger: requestTrigger(),
+    startedAt: entry.runTime, durationMs: entry.duration, rowCount: entry.rowCount, readRows: entry.readRows,
+    readBytes: entry.readBytes, queryId: entry.queryId, status: entry.status || 'ok', error: entry.error, detail: entry.detail,
+  });
 }
 function getAggregatesForFilename(type, filename) {
-  if (type !== 'alert') return null;
-  return _aggregateOne(_alertRuns.get(filename));
+  return runStats(RUN_KIND[type], scopedEnv().name).get(filename) || null;
 }
 function getAggregatesByFilename(type) {
-  const out = new Map();
-  if (type !== 'alert') return out;
-  for (const [filename, list] of _alertRuns) {
-    const agg = _aggregateOne(list);
-    if (agg) out.set(filename, agg);
-  }
-  return out;
+  return runStats(RUN_KIND[type], scopedEnv().name);
 }
 function getRunLog(type, filename, limit = 50) {
-  if (type !== 'alert') return [];
-  return (_alertRuns.get(filename) || []).slice(0, limit);
+  return runLog(RUN_KIND[type], filename, scopedEnv().name, limit);
+}
+function clearRunStats(type, filename = null) {
+  clearRuns(RUN_KIND[type], scopedEnv().name, filename);
 }
 
 // Returns a coarse identifier for the currently-connected ClickHouse env so
@@ -263,7 +426,7 @@ function getRunLog(type, filename, limit = 50) {
 // env vars when the active env can't be resolved from the config.
 function currentEnv() {
   try {
-    const active = Array.isArray(environments) ? environments[activeEnvIndex] : null;
+    const active = Array.isArray(environments) ? scopedEnv() : null;
     if (active) {
       return {
         name: active.name,
@@ -335,11 +498,13 @@ async function sendAlertWebhook({ filename, description, data, rowCount, env }) 
 // ==================== END ALERTS RUN-LOG STUBS ====================
 
 // ==================== ALERTS HELPERS ====================
-const ALERTS_FOLDER = 'alerts';
-const getAlertsPath = () => path.join(process.cwd(), ALERTS_FOLDER);
+const getAlertsPath = () => getClientFolder('monitoring');
 const descriptionPathFor = (folder, sqlFilename) =>
   path.join(folder, sqlFilename.replace(/.sql$/, '.md'));
+// A `-- description:` header in the .sql file wins; a sidecar .md file is the fallback
 function readDescription(folder, sqlFilename) {
+  const fromHeader = checkMeta(readSqlHeader(path.join(folder, sqlFilename)).meta).description;
+  if (fromHeader) return fromHeader;
   try { return fs.readFileSync(descriptionPathFor(folder, sqlFilename), 'utf-8').trim(); }
   catch { return ''; }
 }
@@ -352,8 +517,9 @@ function writeDescription(folder, sqlFilename, description) {
 
 // Helper to get system table reference - uses clusterAllReplicas() if cluster is configured
 function getSystemTable(tableName) {
-  if (CLICKHOUSE_CLUSTER) {
-    return `clusterAllReplicas('${CLICKHOUSE_CLUSTER}', system.${tableName})`;
+  const cluster = scopedEnv()?.cluster ?? null;
+  if (cluster) {
+    return `clusterAllReplicas('${cluster}', system.${tableName})`;
   }
   return `system.${tableName}`;
 }
@@ -403,6 +569,7 @@ app.get('/api/connection-info', async (req, res) => {
       secure: env.secure,
       user: env.user,
       cluster: CLICKHOUSE_CLUSTER || null,
+      deployment: env.deployment,
       connected: true
     });
   } catch (error) {
@@ -428,10 +595,13 @@ app.get('/api/config/environments', (req, res) => {
     environments: envs.map((env, i) => ({
       index: i,
       name: env.name,
+      organisation: env.organisation || null,
+      environment: env.environment || null,
       host: env.host,
       port: env.port,
       user: env.user,
       database: env.database,
+      deployment: env.deployment,
     })),
   });
 });
@@ -456,10 +626,13 @@ app.get('/api/environments', (req, res) => {
     environments: environments.map((env, i) => ({
       index: i,
       name: env.name,
+      organisation: env.organisation || null,
+      environment: env.environment || null,
       host: env.host,
       port: env.port,
       user: env.user,
       database: env.database,
+      deployment: env.deployment,
     })),
   });
 });
@@ -513,9 +686,18 @@ function getYamlPath() {
 // Helper to save environments to querydog.yml
 function saveConfig(envs) {
   const yamlPath = getYamlPath();
-  const data = { environments: envs.map(env => {
+  let existing = {};
+  try {
+    existing = (fs.existsSync(yamlPath) && yaml.load(fs.readFileSync(yamlPath, 'utf-8'))) || {};
+  } catch {
+    existing = {};
+  }
+  // Keep top-level settings other than environments (client, folders, ...)
+  const data = { ...existing, environments: envs.map(env => {
     const result = {
       name: env.name,
+      ...(env.organisation_override ? { organisation_name: env.organisation_override } : {}),
+      ...(env.environment ? { environment: env.environment } : {}),
       host: env.host,
       port: env.port,
       user: env.user,
@@ -527,14 +709,33 @@ function saveConfig(envs) {
     if (env.tls_reject_unauthorized === false) {
       result.tls_reject_unauthorized = false;
     }
-    if (env.cluster) {
-      result.cluster = env.cluster;
+    if (env.is_default) {
+      result.default = true;
+    }
+    if (env.cluster_setting !== null && env.cluster_setting !== undefined) {
+      result.cluster = env.cluster_setting;
+      if (env.cluster_setting && env.cluster_name && env.cluster_name !== 'default') result.cluster_name = env.cluster_name;
+    } else if (env.cluster) {
+      result.cluster = true;
+      if (env.cluster !== 'default') result.cluster_name = env.cluster;
     }
     if (env.queries_folder && env.queries_folder !== 'queries') {
       result.queries_folder = env.queries_folder;
     }
     if (env.http_headers && Object.keys(env.http_headers).length > 0) {
       result.http_headers = env.http_headers;
+    }
+    if (env.deployment_setting) {
+      result.deployment = env.deployment_setting;
+    }
+    if (env.cloud_api) {
+      result.cloud_api = env.cloud_api;
+    }
+    if (env.scheduler !== null && env.scheduler !== undefined) {
+      result.scheduler = env.scheduler;
+    }
+    if (env._embeddedId) {
+      result._embeddedId = env._embeddedId;
     }
     return result;
   })};
@@ -543,10 +744,35 @@ function saveConfig(envs) {
 
 // Helper to reload environments from disk
 function reloadEnvironments() {
-  const newEnvs = loadConfig({ quiet: true });
+  let newEnvs;
+  try {
+    newEnvs = loadConfig({ quiet: true });
+  } catch (e) {
+    // Keep running on the last good config; the file is fixed and reloaded later
+    console.error(`${e.message}\nKeeping the environments loaded earlier.`);
+    return;
+  }
   environments.length = 0;
   environments.push(...newEnvs);
+  loadClientConfig();
 }
+
+// Which client folder is loaded and where each class of checks comes from
+app.get('/api/client', (req, res) => {
+  res.json({
+    client: clientConfig.client,
+    path: getClientDir(),
+    folders: Object.fromEntries(CLIENT_FOLDER_KINDS.map(kind => {
+      const dir = kind === 'performance' ? getQueriesPath() : getClientFolder(kind);
+      const exists = fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+      // alerts holds rules.yml; the other classes are .sql files
+      const files = !exists ? 0 : kind === 'alerts'
+        ? (fs.existsSync(path.join(dir, 'rules.yml')) ? 1 : 0)
+        : fs.readdirSync(dir).filter(f => f.endsWith('.sql')).length;
+      return [kind, { path: dir, exists, files }];
+    })),
+  });
+});
 
 // Get full environment details (including secure fields for editing)
 app.get('/api/config/environments/full', (req, res) => {
@@ -556,6 +782,8 @@ app.get('/api/config/environments/full', (req, res) => {
     environments: envs.map((env, i) => ({
       index: i,
       name: env.name,
+      organisation: env.organisation || null,
+      environment: env.environment || null,
       host: env.host,
       port: env.port,
       user: env.user,
@@ -564,8 +792,9 @@ app.get('/api/config/environments/full', (req, res) => {
       secure: env.secure,
       tls_reject_unauthorized: env.tls_reject_unauthorized,
       cluster: env.cluster || '',
-      queries_folder: env.queries_folder || 'queries',
+      queries_folder: env.queries_folder || null,
       http_headers: env.http_headers || {},
+      deployment: env.deployment,
     })),
   });
 });
@@ -573,7 +802,7 @@ app.get('/api/config/environments/full', (req, res) => {
 // Add new environment
 app.post('/api/config/environments', (req, res) => {
   try {
-    const { name, host, port, user, password, database, secure, tls_reject_unauthorized, cluster, queries_folder, http_headers } = req.body;
+    const { name, host, port, user, password, database, secure, tls_reject_unauthorized, cluster, queries_folder, http_headers, deployment } = req.body;
 
     // Validate required fields
     if (!name || !host) {
@@ -583,6 +812,8 @@ app.post('/api/config/environments', (req, res) => {
     const envs = loadConfig({ quiet: true });
     const newEnv = {
       name,
+      organisation_override: typeof req.body.organisation === 'string' && req.body.organisation.trim() ? req.body.organisation.trim() : null,
+      environment: typeof req.body.environment === 'string' && req.body.environment.trim() ? req.body.environment.trim() : null,
       host,
       port: parseInt(port) || (secure ? 8443 : 8123),
       user: user || 'default',
@@ -590,9 +821,13 @@ app.post('/api/config/environments', (req, res) => {
       database: database || 'default',
       secure: secure || false,
       tls_reject_unauthorized: tls_reject_unauthorized !== false,
-      cluster: cluster || null,
-      queries_folder: queries_folder || 'queries',
+      // The editor sends a cluster name; empty means a single server
+      cluster: cluster ? String(cluster).trim() : null,
+      cluster_setting: !!cluster,
+      cluster_name: cluster ? String(cluster).trim() : null,
+      queries_folder: queries_folder || null,
       http_headers: http_headers || {},
+      deployment_setting: deployment === 'cloud' || deployment === 'oss' ? deployment : null,
     };
 
     envs.push(newEnv);
@@ -628,7 +863,7 @@ app.put('/api/config/environments/:index', (req, res) => {
       return res.status(400).json({ error: 'Invalid environment index' });
     }
 
-    const { name, host, port, user, password, database, secure, tls_reject_unauthorized, cluster, queries_folder, http_headers } = req.body;
+    const { name, host, port, user, password, database, secure, tls_reject_unauthorized, cluster, queries_folder, http_headers, deployment } = req.body;
 
     // Validate required fields
     if (!name || !host) {
@@ -637,6 +872,8 @@ app.put('/api/config/environments/:index', (req, res) => {
 
     envs[index] = {
       name,
+      organisation_override: req.body.organisation !== undefined ? (String(req.body.organisation || '').trim() || null) : envs[index].organisation_override,
+      environment: req.body.environment !== undefined ? (String(req.body.environment || '').trim() || null) : envs[index].environment,
       host,
       port: parseInt(port) || (secure ? 8443 : 8123),
       user: user || 'default',
@@ -644,9 +881,18 @@ app.put('/api/config/environments/:index', (req, res) => {
       database: database || 'default',
       secure: secure || false,
       tls_reject_unauthorized: tls_reject_unauthorized !== false,
-      cluster: cluster || null,
-      queries_folder: queries_folder || 'queries',
+      // The editor sends a cluster name; empty means a single server
+      cluster: cluster ? String(cluster).trim() : null,
+      cluster_setting: !!cluster,
+      cluster_name: cluster ? String(cluster).trim() : null,
+      queries_folder: queries_folder || null,
       http_headers: http_headers || {},
+      // Fields the edit form doesn't manage are carried over from the existing entry
+      deployment_setting: deployment === 'cloud' || deployment === 'oss' ? deployment : envs[index].deployment_setting,
+      cloud_api: envs[index].cloud_api,
+      is_default: envs[index].is_default,
+      scheduler: envs[index].scheduler,
+      _embeddedId: envs[index]._embeddedId,
     };
 
     saveConfig(envs);
@@ -761,9 +1007,19 @@ const ARRAY_FIELDS = [
   'used_row_policies', 'used_privileges', 'missing_privileges', 'thread_ids'
 ];
 
+// Filter/column names from the browser are interpolated into SQL, so only
+// plain identifiers are accepted; anything else is ignored.
+const SAFE_IDENTIFIER = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+// Wrap user text for ILIKE so '%' and '_' in it match literally.
+function likePattern(text) {
+  return `%${String(text).replace(/[\\%_]/g, '\\$&')}%`;
+}
+
 // Build filter condition handling both scalar and array fields
 function buildFilterCondition(field, values, params, paramIndex) {
   const paramName = `filter_${paramIndex}`;
+  if (!SAFE_IDENTIFIER.test(field)) return '1';
 
   // Special case: primary_table filters by the first element of tables array
   // This is useful for finding queries WHERE a table is the primary target (e.g., INSERT INTO target)
@@ -807,7 +1063,7 @@ function buildFilterCondition(field, values, params, paramIndex) {
     }
 
     if (textMatches.length > 0) {
-      conditions.push(`(toString(${field}) = '' AND (${textMatches.join(' OR ')}))`);
+      conditions.push(`(toString(${field}) IN ('', 'None') AND (${textMatches.join(' OR ')}))`);
     }
 
     return `(${conditions.join(' OR ')})`;
@@ -829,16 +1085,13 @@ function buildRangeFilterConditions(rangeFilters, whereConditions, params) {
   if (!rangeFilters) return;
   const parsed = JSON.parse(rangeFilters);
   for (const [field, range] of Object.entries(parsed)) {
-    if (!(/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field))) continue; // Safety check
-    if (range.min !== undefined) {
-      const paramName = `${field}_min`;
-      whereConditions.push(`${field} >= {${paramName}:UInt64}`);
-      params[paramName] = range.min;
-    }
-    if (range.max !== undefined) {
-      const paramName = `${field}_max`;
-      whereConditions.push(`${field} <= {${paramName}:UInt64}`);
-      params[paramName] = range.max;
+    if (!SAFE_IDENTIFIER.test(field) || !range) continue; // Safety check
+    for (const [bound, op] of [['min', '>='], ['max', '<=']]) {
+      const value = Number(range[bound]);
+      if (range[bound] === undefined || range[bound] === null || !Number.isFinite(value)) continue;
+      const paramName = `${field}_${bound}`;
+      whereConditions.push(`${field} ${op} {${paramName}:Float64}`);
+      params[paramName] = value;
     }
   }
 }
@@ -976,92 +1229,93 @@ app.get('/api/query-log', asyncHandler(async (req, res) => {
 app.get('/api/query-log/columns', columnsHandler('query_log'));
 
 // Get time series data for chart
-app.get('/api/query-log/timeseries', async (req, res) => {
-  try {
-    const { start, end, bucket = 'minute', search, filters, rangeFilters } = req.query;
+app.get('/api/query-log/timeseries', asyncHandler(async (req, res) => {
+  const { start, end, bucket = 'minute', search, filters, rangeFilters } = req.query;
 
-    let whereConditions = [];
-    const params = {};
+  let whereConditions = [];
+  const params = {};
 
-    applyQueryLogDateRange(start, end, bucket, whereConditions, params);
-    applyQueryLogSearch(search, whereConditions, params);
+  applyQueryLogDateRange(start, end, bucket, whereConditions, params);
+  applyQueryLogSearch(search, whereConditions, params);
 
-    if (filters) {
-      const parsedFilters = JSON.parse(filters);
-      let paramIndex = 0;
-      for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
-          whereConditions.push(buildFilterCondition(field, values, params, paramIndex++));
-        }
+  if (filters) {
+    const parsedFilters = JSON.parse(filters);
+    let paramIndex = 0;
+    for (const [field, values] of Object.entries(parsedFilters)) {
+      if (values && values.length > 0) {
+        whereConditions.push(buildFilterCondition(field, values, params, paramIndex++));
       }
     }
-
-    // Apply range filters
-    buildRangeFilterConditions(rangeFilters, whereConditions, params);
-
-    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
-
-    let truncFunc;
-    switch (bucket) {
-      case 'second':
-        truncFunc = 'toDateTime(event_time_microseconds)';
-        break;
-      case 'hour':
-        truncFunc = 'toStartOfHour(event_time)';
-        break;
-      default:
-        truncFunc = 'toStartOfMinute(event_time)';
-    }
-
-    const query = `
-      SELECT
-        ${truncFunc} as time,
-        count() as count,
-        avg(query_duration_ms) as avg_duration,
-        max(query_duration_ms) as max_duration,
-        min(query_duration_ms) as min_duration,
-        sum(query_duration_ms) as sum_duration,
-        avg(memory_usage) as avg_memory,
-        max(memory_usage) as max_memory,
-        min(memory_usage) as min_memory,
-        sum(memory_usage) as sum_memory,
-        avg(read_rows) as avg_read_rows,
-        max(read_rows) as max_read_rows,
-        min(read_rows) as min_read_rows,
-        sum(read_rows) as sum_read_rows,
-        avg(written_rows) as avg_written_rows,
-        max(written_rows) as max_written_rows,
-        min(written_rows) as min_written_rows,
-        sum(written_rows) as sum_written_rows,
-        avg(result_rows) as avg_result_rows,
-        max(result_rows) as max_result_rows,
-        min(result_rows) as min_result_rows,
-        sum(result_rows) as sum_result_rows
-      FROM ${getSystemTable('query_log')}
-      ${whereClause}
-      GROUP BY time
-      ORDER BY time ASC
-    `;
-
-    const result = await client.query({
-      query,
-      query_params: params,
-      format: 'JSONEachRow',
-    });
-
-    const data = await result.json();
-    res.json(data);
-  } catch (error) {
-    console.error('Error fetching time series:', error);
-    console.error('Query was:', query);
-    console.error('Params were:', params);
-    res.status(500).json({ error: error.message });
   }
-});
+
+  // Apply range filters
+  buildRangeFilterConditions(rangeFilters, whereConditions, params);
+
+  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+  let truncFunc;
+  switch (bucket) {
+    case 'second':
+      truncFunc = 'toDateTime(event_time_microseconds)';
+      break;
+    case 'hour':
+      truncFunc = 'toStartOfHour(event_time)';
+      break;
+    default:
+      truncFunc = 'toStartOfMinute(event_time)';
+  }
+
+  const query = `
+    SELECT
+      ${truncFunc} as time,
+      count() as count,
+      avg(query_duration_ms) as avg_duration,
+      max(query_duration_ms) as max_duration,
+      min(query_duration_ms) as min_duration,
+      sum(query_duration_ms) as sum_duration,
+      avg(memory_usage) as avg_memory,
+      max(memory_usage) as max_memory,
+      min(memory_usage) as min_memory,
+      sum(memory_usage) as sum_memory,
+      avg(read_rows) as avg_read_rows,
+      max(read_rows) as max_read_rows,
+      min(read_rows) as min_read_rows,
+      sum(read_rows) as sum_read_rows,
+      avg(written_rows) as avg_written_rows,
+      max(written_rows) as max_written_rows,
+      min(written_rows) as min_written_rows,
+      sum(written_rows) as sum_written_rows,
+      avg(result_rows) as avg_result_rows,
+      max(result_rows) as max_result_rows,
+      min(result_rows) as min_result_rows,
+      sum(result_rows) as sum_result_rows
+    FROM ${getSystemTable('query_log')}
+    ${whereClause}
+    GROUP BY time
+    ORDER BY time ASC
+  `;
+
+  const result = await client.query({
+    query,
+    query_params: params,
+    format: 'JSONEachRow',
+  });
+
+  const data = await result.json();
+  res.json(data);
+}));
 
 // Get stacked time series data for chart (grouped by query_kind)
+// Columns the stacked chart can split by query kind, besides the plain count
+const STACKED_METRIC_COLUMNS = { duration: 'query_duration_ms', memory: 'memory_usage', read_rows: 'read_rows', written_rows: 'written_rows', result_rows: 'result_rows' };
+const STACKED_AGGREGATIONS = ['avg', 'sum', 'min', 'max'];
+
 app.get('/api/query-log/timeseries-stacked', asyncHandler(async (req, res) => {
-  const { start, end, bucket = 'minute', search, filters, rangeFilters } = req.query;
+  const { start, end, bucket = 'minute', search, filters, rangeFilters, metric = 'count', agg = 'avg' } = req.query;
+  // Allow-listed, so safe to interpolate: countIf(cond), or e.g. avgIf(memory_usage, cond)
+  const column = STACKED_METRIC_COLUMNS[metric];
+  const fn = STACKED_AGGREGATIONS.includes(agg) ? agg : 'avg';
+  const kindValue = (cond) => (column ? `ifNotFinite(${fn}If(${column}, ${cond}), 0)` : `countIf(${cond})`);
 
   let whereConditions = [];
   const params = {};
@@ -1100,13 +1354,11 @@ app.get('/api/query-log/timeseries-stacked', asyncHandler(async (req, res) => {
   const query = `
     SELECT
       ${truncFunc} as time,
-      countIf(query_kind = 'Select' OR (query_kind = '' AND upper(trimLeft(query)) LIKE 'SELECT%')) as Select,
-      countIf(query_kind IN ('Insert', 'AsyncInsertFlush') OR (query_kind = '' AND upper(trimLeft(query)) LIKE 'INSERT%')) as Insert,
-      countIf(query_kind = 'Delete' OR (query_kind = '' AND upper(trimLeft(query)) LIKE 'DELETE%')) as Delete,
-      countIf(
-        query_kind NOT IN ('Select', 'Insert', 'AsyncInsertFlush', 'Delete', '')
-        OR (query_kind = '' AND upper(trimLeft(query)) NOT LIKE 'SELECT%' AND upper(trimLeft(query)) NOT LIKE 'INSERT%' AND upper(trimLeft(query)) NOT LIKE 'DELETE%')
-      ) as Other
+      ${kindValue(`query_kind = 'Select' OR (query_kind IN ('', 'None') AND upper(trimLeft(query)) LIKE 'SELECT%')`)} as Select,
+      ${kindValue(`query_kind IN ('Insert', 'AsyncInsertFlush') OR (query_kind IN ('', 'None') AND upper(trimLeft(query)) LIKE 'INSERT%')`)} as Insert,
+      ${kindValue(`query_kind = 'Delete' OR (query_kind IN ('', 'None') AND upper(trimLeft(query)) LIKE 'DELETE%')`)} as Delete,
+      ${kindValue(`query_kind NOT IN ('Select', 'Insert', 'AsyncInsertFlush', 'Delete', '', 'None')
+        OR (query_kind IN ('', 'None') AND upper(trimLeft(query)) NOT LIKE 'SELECT%' AND upper(trimLeft(query)) NOT LIKE 'INSERT%' AND upper(trimLeft(query)) NOT LIKE 'DELETE%')`)} as Other
     FROM ${getSystemTable('query_log')}
     ${whereClause}
     GROUP BY time
@@ -1191,7 +1443,7 @@ app.get('/api/query-log/profile-events', asyncHandler(async (req, res) => {
 // Get histogram data for a specific field
 app.get('/api/query-log/histogram/:field', asyncHandler(async (req, res) => {
   const { field } = req.params;
-  const { start, end, bucket = 'minute', limit = 20, search, filters } = req.query;
+  const { start, end, bucket = 'minute', limit = 20, search, filters, rangeFilters } = req.query;
 
   const scalarFields = [
     'client_name', 'user', 'type', 'query_kind', 'current_database',
@@ -1213,6 +1465,8 @@ app.get('/api/query-log/histogram/:field', asyncHandler(async (req, res) => {
       }
     }
   }
+
+  buildRangeFilterConditions(rangeFilters, whereConditions, params);
 
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
   params.limit = parseInt(limit);
@@ -1275,19 +1529,22 @@ app.get('/api/query-log/distinct/:field', asyncHandler(async (req, res) => {
 
   let query;
   if (ARRAY_FIELDS.includes(field)) {
+    // Most frequent first, so the LIMIT keeps the values people are likely to filter on
     query = `
-      SELECT DISTINCT arrayJoin(${field}) as value
+      SELECT arrayJoin(${field}) as value
       FROM ${getSystemTable('query_log')}
       ${whereClause}
-      ORDER BY value
+      GROUP BY value
+      ORDER BY count() DESC, value
       LIMIT {limit:UInt32}
     `;
   } else if (scalarFields.includes(field)) {
     query = `
-      SELECT DISTINCT toString(${field}) as value
+      SELECT toString(${field}) as value
       FROM ${getSystemTable('query_log')}
       ${whereClause}
-      ORDER BY value
+      GROUP BY value
+      ORDER BY count() DESC, value
       LIMIT {limit:UInt32}
     `;
   } else {
@@ -1316,7 +1573,7 @@ app.get('/api/parts', asyncHandler(async (req, res) => {
   // Apply search filter (searches table, database, partition_id, name)
   if (search) {
     whereConditions.push('(table ILIKE {search:String} OR database ILIKE {search:String} OR partition_id ILIKE {search:String} OR name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   // Apply field filters
@@ -1324,7 +1581,7 @@ app.get('/api/parts', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -1368,7 +1625,7 @@ app.get('/api/parts/count', asyncHandler(async (req, res) => {
   // Apply search filter
   if (search) {
     whereConditions.push('(table ILIKE {search:String} OR database ILIKE {search:String} OR partition_id ILIKE {search:String} OR name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   // Apply field filters
@@ -1376,7 +1633,7 @@ app.get('/api/parts/count', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -1413,7 +1670,7 @@ app.get('/api/parts/grouped', async (req, res) => {
     // Apply search filter
     if (search) {
       whereConditions.push('(t.name ILIKE {search:String} OR t.database ILIKE {search:String})');
-      params.search = `%${search}%`;
+      params.search = likePattern(search);
     }
 
     // Apply field filters
@@ -1424,7 +1681,7 @@ app.get('/api/parts/grouped', async (req, res) => {
         // Skip 'active' filter - it's already handled in the JOIN clause (p.active = 1)
         // and applying it to WHERE would exclude tables with no parts
         if (field === 'active') continue;
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           // Map field names to table aliases
@@ -1542,7 +1799,7 @@ app.get('/api/partitions-summary', asyncHandler(async (req, res) => {
   // Apply search filter
   if (search) {
     whereConditions.push('(table ILIKE {search:String} OR database ILIKE {search:String} OR partition_id ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   // Apply field filters
@@ -1550,7 +1807,7 @@ app.get('/api/partitions-summary', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -1612,14 +1869,14 @@ app.get('/api/partitions-summary/count', async (req, res) => {
 
     if (search) {
       whereConditions.push('(table ILIKE {search:String} OR database ILIKE {search:String} OR partition_id ILIKE {search:String})');
-      params.search = `%${search}%`;
+      params.search = likePattern(search);
     }
 
     if (filters) {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -1716,7 +1973,7 @@ app.get('/api/partitions', asyncHandler(async (req, res) => {
   // Apply search filter (searches table, database, partition_id, name)
   if (search) {
     whereConditions.push('(table ILIKE {search:String} OR database ILIKE {search:String} OR partition_id ILIKE {search:String} OR name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   // Apply field filters
@@ -1724,7 +1981,7 @@ app.get('/api/partitions', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -1765,7 +2022,7 @@ app.get('/api/partitions/count', asyncHandler(async (req, res) => {
   // Apply search filter
   if (search) {
     whereConditions.push('(table ILIKE {search:String} OR database ILIKE {search:String} OR partition_id ILIKE {search:String} OR name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   // Apply field filters
@@ -1773,7 +2030,7 @@ app.get('/api/partitions/count', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2067,7 +2324,7 @@ app.get('/api/processes', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2089,7 +2346,7 @@ app.get('/api/processes/columns', columnsHandler('processes'));
 app.get('/api/processes/distinct/:field', asyncHandler(async (req, res) => {
   const { field } = req.params;
   const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'user';
-  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('processes')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('processes')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2105,7 +2362,7 @@ app.get('/api/merges', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2127,7 +2384,7 @@ app.get('/api/merges/columns', columnsHandler('merges'));
 app.get('/api/merges/distinct/:field', asyncHandler(async (req, res) => {
   const { field } = req.params;
   const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'database';
-  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('merges')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('merges')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2143,7 +2400,7 @@ app.get('/api/mutations', asyncHandler(async (req, res) => {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2165,7 +2422,7 @@ app.get('/api/mutations/columns', columnsHandler('mutations'));
 app.get('/api/mutations/distinct/:field', asyncHandler(async (req, res) => {
   const { field } = req.params;
   const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'database';
-  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('mutations')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('mutations')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2206,7 +2463,7 @@ app.get('/api/view-refreshes/columns', columnsHandler('view_refreshes'));
 app.get('/api/view-refreshes/distinct/:field', asyncHandler(async (req, res) => {
   const { field } = req.params;
   const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'database';
-  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('view_refreshes')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+  const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('view_refreshes')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2225,7 +2482,7 @@ app.get('/api/query-cache', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2264,7 +2521,7 @@ app.get('/api/background-jobs', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2295,7 +2552,7 @@ app.get('/api/background-jobs/distinct/:field', async (req, res) => {
   try {
     const { field } = req.params;
     const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'status';
-    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('backup_log')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('backup_log')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
     const result = await client.query({ query, format: 'JSONEachRow' });
     const data = await result.json();
     res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2322,7 +2579,7 @@ app.get('/api/async-inserts', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2353,7 +2610,7 @@ app.get('/api/async-inserts/distinct/:field', async (req, res) => {
   try {
     const { field } = req.params;
     const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'database';
-    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('asynchronous_inserts')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('asynchronous_inserts')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
     const result = await client.query({ query, format: 'JSONEachRow' });
     const data = await result.json();
     res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2378,7 +2635,7 @@ app.get('/api/async-insert-log', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2409,7 +2666,7 @@ app.get('/api/async-insert-log/distinct/:field', async (req, res) => {
   try {
     const { field } = req.params;
     const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'database';
-    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('asynchronous_insert_log')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('asynchronous_insert_log')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
     const result = await client.query({ query, format: 'JSONEachRow' });
     const data = await result.json();
     res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2436,7 +2693,7 @@ app.get('/api/distributed-ddl', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -2467,7 +2724,7 @@ app.get('/api/distributed-ddl/distinct/:field', async (req, res) => {
   try {
     const { field } = req.params;
     const safeField = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) ? field : 'status';
-    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('distributed_ddl_queue')} WHERE ${safeField} != '' ORDER BY value LIMIT 100`;
+    const query = `SELECT DISTINCT toString(${safeField}) as value FROM ${getSystemTable('distributed_ddl_queue')} WHERE toString(${safeField}) != '' ORDER BY value LIMIT 100`;
     const result = await client.query({ query, format: 'JSONEachRow' });
     const data = await result.json();
     res.json(data.map(row => row.value).filter(v => v !== ''));
@@ -2692,7 +2949,7 @@ app.get('/api/projections', asyncHandler(async (req, res) => {
   }
 
   if (search) {
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
     whereConditions.push(`(database ILIKE {search:String} OR table ILIKE {search:String} OR name ILIKE {search:String})`);
   }
 
@@ -2821,7 +3078,7 @@ app.get('/api/views', asyncHandler(async (req, res) => {
   }
 
   if (search) {
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
     whereConditions.push(`(database ILIKE {search:String} OR name ILIKE {search:String})`);
   }
 
@@ -2880,7 +3137,7 @@ app.get('/api/dictionaries', asyncHandler(async (req, res) => {
   }
 
   if (search) {
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
     whereConditions.push(`(database ILIKE {search:String} OR name ILIKE {search:String})`);
   }
 
@@ -2952,7 +3209,7 @@ app.get('/api/indexes', asyncHandler(async (req, res) => {
   // Apply search
   if (search) {
     whereConditions.push('(database ILIKE {search:String} OR table ILIKE {search:String} OR name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
@@ -3029,7 +3286,7 @@ app.get('/api/data-skipping-indexes', asyncHandler(async (req, res) => {
   // Apply search
   if (search) {
     whereConditions.push('(database ILIKE {search:String} OR table ILIKE {search:String} OR name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
@@ -3212,7 +3469,7 @@ app.get('/api/quota-limits/columns', columnsHandler('quota_limits'));
 
 // Get system.row_policies
 app.get('/api/row-policies', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.row_policies ORDER BY short_name, database, table_name`;
+  const query = `SELECT * FROM system.row_policies ORDER BY short_name, database, \`table\``;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
@@ -3322,15 +3579,16 @@ app.post('/api/query', asyncHandler(async (req, res) => {
 
   // Safety: don't allow dangerous operations
   const upperQuery = userQuery.toUpperCase();
-  const dangerousKeywords = ['DROP', 'TRUNCATE', 'DELETE', 'ALTER', 'DETACH', 'ATTACH', 'RENAME', 'KILL'];
-  const isDangerous = dangerousKeywords.some(kw => upperQuery.startsWith(kw));
+  const isDangerous = isBlockedStatement(userQuery);
 
   if (isDangerous) {
     return res.status(403).json({ error: 'Dangerous operations are not allowed through this interface' });
   }
 
-  // Check if query already has a FORMAT clause
-  const hasFormat = upperQuery.includes('FORMAT');
+  // A FORMAT clause at the end of the query, optionally followed by SETTINGS.
+  // (Not formatReadableSize(...), INFORMATION_SCHEMA or a column called format.)
+  const formatClause = /\s+FORMAT\s+[A-Za-z]\w*(?=(\s+SETTINGS\b[\s\S]*)?\s*$)/i;
+  const hasFormat = formatClause.test(userQuery);
 
   // Add LIMIT only for SELECT queries that don't already have one
   // Don't add LIMIT to EXPLAIN, SHOW, DESCRIBE, or queries with FORMAT or subqueries at the end
@@ -3350,16 +3608,8 @@ app.post('/api/query', asyncHandler(async (req, res) => {
   // Strip the FORMAT clause and let the query handle it, or use text mode
   let data;
   if (hasFormat) {
-    // Query has its own FORMAT - execute as-is and parse the result
-    // Remove the FORMAT clause to let us control the output
-    const formatMatch = userQuery.match(/\s+FORMAT\s+\w+\s*$/i);
-    if (formatMatch) {
-      // Remove FORMAT clause and add our own
-      finalQuery = userQuery.replace(/\s+FORMAT\s+\w+\s*$/i, '');
-      if (shouldAddLimit) {
-        finalQuery = `${finalQuery} LIMIT ${limit}`;
-      }
-    }
+    // Remove the query's own FORMAT clause so the result comes back as JSONEachRow
+    finalQuery = userQuery.replace(formatClause, '');
     const result = await client.query({
       query: finalQuery,
       format: 'JSONEachRow',
@@ -3581,7 +3831,7 @@ app.get('/api/query-views-log', async (req, res) => {
 
     if (search) {
       whereConditions.push(`(view_name ILIKE {search:String} OR view_query ILIKE {search:String} OR initial_query_id ILIKE {search:String})`);
-      params.search = `%${search}%`;
+      params.search = likePattern(search);
     }
 
     if (filters) {
@@ -3634,7 +3884,7 @@ app.get('/api/query-views-log', async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error('Error fetching query_views_log:', error);
-    if (error.message?.includes('UNKNOWN_TABLE')) {
+    if (error.message?.includes('UNKNOWN_TABLE') || error.message?.includes('Unknown table')) {
       res.json([]); // Return empty array if table doesn't exist
     } else {
       res.status(500).json({ error: error.message });
@@ -3661,7 +3911,7 @@ app.get('/api/query-views-log/count', async (req, res) => {
 
     if (search) {
       whereConditions.push(`(view_name ILIKE {search:String} OR view_query ILIKE {search:String} OR initial_query_id ILIKE {search:String})`);
-      params.search = `%${search}%`;
+      params.search = likePattern(search);
     }
 
     if (filters) {
@@ -3687,7 +3937,7 @@ app.get('/api/query-views-log/count', async (req, res) => {
     res.json({ total: data[0]?.total || 0 });
   } catch (error) {
     console.error('Error fetching query_views_log count:', error);
-    if (error.message?.includes('UNKNOWN_TABLE')) {
+    if (error.message?.includes('UNKNOWN_TABLE') || error.message?.includes('Unknown table')) {
       res.json({ total: 0 });
     } else {
       res.status(500).json({ error: error.message });
@@ -3736,7 +3986,7 @@ app.get('/api/query-views-log/distinct/:field', async (req, res) => {
     res.json(data.map(row => row.value).filter(v => v !== '' && v !== null));
   } catch (error) {
     console.error('Error fetching query_views_log distinct:', error);
-    if (error.message?.includes('UNKNOWN_TABLE')) {
+    if (error.message?.includes('UNKNOWN_TABLE') || error.message?.includes('Unknown table')) {
       res.json([]);
     } else {
       res.status(500).json({ error: error.message });
@@ -3773,7 +4023,7 @@ app.get('/api/part-log', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -3873,7 +4123,7 @@ app.get('/api/part-log/count', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -3959,7 +4209,7 @@ app.get('/api/part-log/timeseries', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -4068,7 +4318,7 @@ app.get('/api/part-log/timeseries-stacked', async (req, res) => {
       const parsedFilters = JSON.parse(filters);
       let paramIndex = 0;
       for (const [field, values] of Object.entries(parsedFilters)) {
-        if (values && values.length > 0) {
+        if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
           const paramName = `filter_${paramIndex++}`;
           params[paramName] = values;
           whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -4357,14 +4607,14 @@ app.get('/api/text-log', asyncHandler(async (req, res) => {
   }
   if (search) {
     whereConditions.push('(message ILIKE {search:String} OR logger_name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   if (filters) {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -4417,14 +4667,14 @@ app.get('/api/text-log/count', asyncHandler(async (req, res) => {
   }
   if (search) {
     whereConditions.push('(message ILIKE {search:String} OR logger_name ILIKE {search:String})');
-    params.search = `%${search}%`;
+    params.search = likePattern(search);
   }
 
   if (filters) {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -4452,7 +4702,7 @@ app.get('/api/text-log/count', asyncHandler(async (req, res) => {
 
 // Get text_log time series for chart
 app.get('/api/text-log/timeseries', asyncHandler(async (req, res) => {
-  const { start, end, bucket = 'minute', filters } = req.query;
+  const { start, end, bucket = 'minute', search, filters } = req.query;
 
   let whereConditions = [];
   const params = {};
@@ -4466,11 +4716,16 @@ app.get('/api/text-log/timeseries', asyncHandler(async (req, res) => {
     params.end = getEffectiveEndTime(start, end);
   }
 
+  if (search) {
+    whereConditions.push('(message ILIKE {search:String} OR logger_name ILIKE {search:String})');
+    params.search = likePattern(search);
+  }
+
   if (filters) {
     const parsedFilters = JSON.parse(filters);
     let paramIndex = 0;
     for (const [field, values] of Object.entries(parsedFilters)) {
-      if (values && values.length > 0) {
+      if (values && values.length > 0 && SAFE_IDENTIFIER.test(field)) {
         const paramName = `filter_${paramIndex++}`;
         params[paramName] = values;
         whereConditions.push(`toString(${field}) IN {${paramName}:Array(String)}`);
@@ -4752,8 +5007,7 @@ app.get('/api/query-log/count', asyncHandler(async (req, res) => {
 
 // ==================== MY QUERIES ENDPOINTS ====================
 
-// In-memory store for query run statistics
-const queryRunStats = new Map();
+const NO_RUNS = { lastRunTime: null, lastDuration: null, lastRowCount: null, lastStatus: null, lastError: null, avgRunTime: null, slowestRunTime: null, fastestRunTime: null, runCount: 0, history: [] };
 
 // Check if queries folder exists
 app.get('/api/my-queries/exists', (req, res) => {
@@ -4772,34 +5026,34 @@ app.get('/api/my-queries', (req, res) => {
     }
 
     const files = fs.readdirSync(queriesPath).filter(f => f.endsWith('.sql'));
+    const allStats = getAggregatesByFilename('query');
     const queries = files.map(filename => {
       const filePath = path.join(queriesPath, filename);
       const content = fs.readFileSync(filePath, 'utf-8').trim();
-      const stats = queryRunStats.get(filename) || { runs: [], lastRun: null, lastDuration: null, lastRowCount: null };
+      const header = parseSqlHeader(content).meta;
+      const meta = checkMeta(header);
+      const stats = allStats.get(filename) || NO_RUNS;
 
-
-      // Calculate statistics
-      const runTimes = stats.runs || [];
-      const avgRunTime = runTimes.length > 0
-        ? runTimes.reduce((a, b) => a + b, 0) / runTimes.length
-        : null;
-      const slowestRunTime = runTimes.length > 0
-        ? Math.max(...runTimes)
-        : null;
-      const fastestRunTime = runTimes.length > 0
-        ? Math.min(...runTimes)
-        : null;
 
       return {
         filename,
         query: content,
-        lastRunTime: stats.lastRun,
+        title: meta.title,
+        description: meta.description || readDescription(queriesPath, filename),
+        severity: meta.severity || 'info',
+        category: meta.category,
+        ...durationLimits(header),
+        lastRunTime: stats.lastRunTime,
         lastDuration: stats.lastDuration,
         lastRowCount: stats.lastRowCount,
-        avgRunTime,
-        slowestRunTime,
-        fastestRunTime,
-        runCount: runTimes.length,
+        avgRunTime: stats.avgRunTime,
+        slowestRunTime: stats.slowestRunTime,
+        fastestRunTime: stats.fastestRunTime,
+        runCount: stats.runCount,
+        // Last stored result, so the grid shows failures after a reload
+        lastStatus: stats.lastStatus ?? null,
+        lastError: stats.lastError ?? null,
+        history: stats.history,
       };
     });
 
@@ -4818,23 +5072,31 @@ app.post('/api/my-queries/run', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Query is required' });
   }
 
-  // Safety check - only allow SELECT, INSERT, and WITH (CTE) queries
-  const upperQuery = query.trim().toUpperCase();
-  if (!upperQuery.startsWith('SELECT') && !upperQuery.startsWith('INSERT') && !upperQuery.startsWith('WITH')) {
+  // Safety check - only allow SELECT, INSERT, and WITH (CTE) queries. The
+  // leading keyword skips comments, so `-- description:` headers are fine.
+  const keyword = leadingKeyword(query);
+  if (!['SELECT', 'INSERT', 'WITH'].includes(keyword)) {
     return res.status(403).json({ error: 'Only SELECT, INSERT, and WITH (CTE) queries are allowed' });
   }
 
   const startTime = Date.now();
-  const isSelect = upperQuery.startsWith('SELECT') || upperQuery.startsWith('WITH');
+  const isSelect = keyword === 'SELECT' || keyword === 'WITH';
 
-  const result = await client.query({
-    query,
-    format: isSelect ? 'JSON' : undefined,
-    clickhouse_settings: {
-      max_execution_time: 0, // No timeout limit for user queries
-    },
-    request_timeout: 3600000, // 1 hour HTTP timeout
-  });
+  let result;
+  try {
+    result = await client.query({
+      query,
+      format: isSelect ? 'JSON' : undefined,
+      clickhouse_settings: {
+        max_execution_time: 0, // No timeout limit for user queries
+      },
+      request_timeout: 3600000, // 1 hour HTTP timeout
+    });
+  } catch (err) {
+    // Failed runs are part of the history too
+    recordRun('query', filename, { runTime: new Date(startTime).toISOString(), duration: Date.now() - startTime, status: 'error', error: err.message });
+    throw err;
+  }
 
   // For SELECT queries, JSON format returns { meta, data, rows, statistics }
   // statistics contains elapsed, rows_read, bytes_read
@@ -4860,52 +5122,13 @@ app.post('/api/my-queries/run', asyncHandler(async (req, res) => {
   }
 
   const queryId = result.query_id;
+  // warn_duration_ms / fail_duration_ms in the header grade a successful run
+  const { status, detail } = durationStatus(duration, durationLimits(parseSqlHeader(query).meta));
 
-  // Update run statistics
   let updatedStats = null;
   if (filename) {
-    const stats = queryRunStats.get(filename) || { runs: [], runLog: [], lastRun: null, lastDuration: null, lastRowCount: null };
-    stats.runs.push(duration);
-    // Keep only last 100 runs
-    if (stats.runs.length > 100) {
-      stats.runs = stats.runs.slice(-100);
-    }
-    // Store run log entry with query_id and stats
-    stats.runLog = stats.runLog || [];
-    stats.runLog.push({
-      queryId,
-      runTime: new Date().toISOString(),
-      duration,
-      rowCount,
-      readRows,
-      readBytes,
-    });
-    // Keep only last 50 run log entries
-    if (stats.runLog.length > 50) {
-      stats.runLog = stats.runLog.slice(-50);
-    }
-    stats.lastRun = new Date().toISOString();
-    stats.lastDuration = duration;
-    stats.lastRowCount = rowCount;
-    queryRunStats.set(filename, stats);
-
-    // Calculate statistics for response
-    const runTimes = stats.runs || [];
-    updatedStats = {
-      lastRunTime: stats.lastRun,
-      lastDuration: stats.lastDuration,
-      lastRowCount: stats.lastRowCount,
-      avgRunTime: runTimes.length > 0
-        ? runTimes.reduce((a, b) => a + b, 0) / runTimes.length
-        : null,
-      slowestRunTime: runTimes.length > 0
-        ? Math.max(...runTimes)
-        : null,
-      fastestRunTime: runTimes.length > 0
-        ? Math.min(...runTimes)
-        : null,
-      runCount: runTimes.length,
-    };
+    recordRun('query', filename, { queryId, runTime: new Date(startTime).toISOString(), duration, rowCount, readRows, readBytes, status, error: detail });
+    updatedStats = getAggregatesForFilename('query', filename);
   }
 
   res.json({
@@ -4913,34 +5136,36 @@ app.post('/api/my-queries/run', asyncHandler(async (req, res) => {
     rowCount,
     duration,
     queryId,
+    status,
+    detail,
     stats: updatedStats,
   });
 }));
 
 // Reset all run statistics (must be before parameterized route)
 app.delete('/api/my-queries/stats', (req, res) => {
-  queryRunStats.clear();
+  clearRunStats('query');
   res.json({ success: true });
 });
 
 // Clear run statistics for a specific query
 app.delete('/api/my-queries/stats/:filename', (req, res) => {
   const { filename } = req.params;
-  queryRunStats.delete(filename);
+  clearRunStats('query', filename);
   res.json({ success: true });
 });
 
 // Get run log for a specific query with query_log info
 app.get('/api/my-queries/run-log/:filename', asyncHandler(async (req, res) => {
   const { filename } = req.params;
-  const stats = queryRunStats.get(filename);
+  const entries = getRunLog('query', filename, 50);
 
-  if (!stats || !stats.runLog || stats.runLog.length === 0) {
+  if (entries.length === 0) {
     return res.json({ runLog: [] });
   }
 
   // Get the query_ids from the run log
-  const queryIds = stats.runLog.map(r => r.queryId).filter(Boolean);
+  const queryIds = entries.map(r => r.queryId).filter(Boolean);
 
   // Fetch query_log info for these query_ids (left join simulated)
   let queryLogData = {};
@@ -4975,96 +5200,25 @@ app.get('/api/my-queries/run-log/:filename', asyncHandler(async (req, res) => {
   }
 
   // Build the response with left join
-  const runLog = stats.runLog.map(entry => ({
+  const runLog = entries.map(entry => ({
     queryId: entry.queryId,
     runTime: entry.runTime,
     duration: entry.duration,
     rowCount: entry.rowCount,
     readRows: entry.readRows,
     readBytes: entry.readBytes,
+    status: entry.status,
+    error: entry.error,
+    trigger: entry.trigger,
     queryLog: queryLogData[entry.queryId] || null,
-  })).reverse(); // Most recent first
+  })); // Most recent first
 
   res.json({ runLog });
 }));
 
 // Update a query file
-app.put('/api/my-queries/update', (req, res) => {
-  try {
-    const { filename, query } = req.body;
-
-    if (!filename || !query) {
-      return res.status(400).json({ error: 'Filename and query are required' });
-    }
-
-    // Validate filename - only allow .sql files and no directory traversal
-    if (!filename.endsWith('.sql') || filename.includes('/') || filename.includes('\\')) {
-      return res.status(400).json({ error: 'Invalid filename' });
-    }
-
-    const queriesPath = getQueriesPath();
-    const filePath = path.join(queriesPath, filename);
-
-    // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Query file not found' });
-    }
-
-    // Write the updated query
-    fs.writeFileSync(filePath, query.trim() + '\n', 'utf-8');
-
-    res.json({ success: true, filename });
-  } catch (error) {
-    console.error('Error updating query:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // Clone a query file
-app.post('/api/my-queries/clone', (req, res) => {
-  try {
-    const { sourceFilename, newFilename, query } = req.body;
-
-    if (!sourceFilename || !newFilename || !query) {
-      return res.status(400).json({ error: 'Source filename, new filename, and query are required' });
-    }
-
-    // Validate filenames - only allow .sql files and no directory traversal
-    if (!newFilename.endsWith('.sql') || newFilename.includes('/') || newFilename.includes('\\')) {
-      return res.status(400).json({ error: 'Invalid filename' });
-    }
-
-    const queriesPath = getQueriesPath();
-    const newFilePath = path.join(queriesPath, newFilename);
-
-    // Check if new file already exists
-    if (fs.existsSync(newFilePath)) {
-      // Find a unique filename by appending a number
-      let counter = 1;
-      let uniqueFilename = newFilename;
-      let uniqueFilePath = newFilePath;
-
-      while (fs.existsSync(uniqueFilePath)) {
-        const baseName = newFilename.replace(/\.sql$/, '');
-        uniqueFilename = `${baseName}_${counter}.sql`;
-        uniqueFilePath = path.join(queriesPath, uniqueFilename);
-        counter++;
-      }
-
-      // Write the cloned query with unique filename
-      fs.writeFileSync(uniqueFilePath, query.trim() + '\n', 'utf-8');
-      return res.json({ success: true, filename: uniqueFilename });
-    }
-
-    // Write the cloned query
-    fs.writeFileSync(newFilePath, query.trim() + '\n', 'utf-8');
-
-    res.json({ success: true, filename: newFilename });
-  } catch (error) {
-    console.error('Error cloning query:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // ==================== CLUSTER ENDPOINTS ====================
 
@@ -5439,15 +5593,46 @@ function isRunningInDocker() {
 const DEFAULT_PORT = isRunningInDocker() ? 3001 : 3002;
 const PORT = process.env.PORT || DEFAULT_PORT;
 let server;
+// The backend scheduler (set once the server listens)
+let scheduler = null;
 
 // Startup function - validates connection before starting server
 
 // Express error middleware — last-resort handler for routes wrapped in
 // asyncHandler that throw. Logs context, returns JSON 500.
+// Convoy extensions (alerting engine, notebooks, data dictionary edits)
+registerExtensions(app, {
+  getClient: () => client,
+  getActiveEnvironment: scopedEnv,
+  getTrigger: requestTrigger,
+  getSchedulerStatus: () => scheduler?.status(),
+  runSchedulerJob: (environment, job) => scheduler?.runNow(environment, job),
+  runSchedulerNow: () => scheduler?.runAll(),
+  lastSchedulerRun: (environment, job) => scheduler?.lastRunOf(environment, job) ?? null,
+  getAlertsPath,
+  getClientFolder,
+  readDescription,
+  recordRun,
+});
+
+// Missing system tables (e.g. system.query_log before ClickHouse's first
+// flush, or when logging is disabled) map to 404 not_found so the UI can show
+// a friendly message instead of a stack trace.
 app.use((err, req, res, _next) => {
+  const message = err?.message || String(err);
+  // Only a missing *system* table (e.g. query_log not enabled) is "not found";
+  // a typo in a user's own table must surface as a normal error
+  const unknownTable = err?.type === 'UNKNOWN_TABLE' || err?.code === '60' ||
+    message.includes('Unknown table') || message.includes('doesn\'t exist');
+  const missingTable = unknownTable && /\bsystem\.\w+/i.test(message);
+  if (missingTable) {
+    console.warn(`Missing table in ${req.method} ${req.path}: ${message.split(' in scope ')[0]}`);
+    if (res.headersSent) return;
+    return res.status(404).json({ error: message, type: 'not_found' });
+  }
   console.error(`Error in ${req.method} ${req.originalUrl}:`, err);
   if (res.headersSent) return;
-  res.status(500).json({ error: err.message });
+  res.status(500).json({ error: message });
 });
 
 async function startup() {
@@ -5470,6 +5655,15 @@ async function startup() {
   // Start HTTP server FIRST (non-blocking)
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT}\n`);
+    // The scheduler calls this server's own API, so start it once listening
+    scheduler = startScheduler({
+      port: server.address().port,
+      readConfig: () => {
+        const yamlPath = findConfigPath();
+        return yamlPath ? yaml.load(fs.readFileSync(yamlPath, 'utf-8')) || {} : null;
+      },
+      environmentNames: () => environments.map(e => e.name),
+    });
   });
 
   // Test ClickHouse connection in background (non-blocking, 6 second timeout)
@@ -5492,32 +5686,45 @@ async function startup() {
 }
 
 // Graceful shutdown handler
+let shuttingDown = false;
 function shutdown(signal) {
+  // A second Ctrl+C exits straight away
+  if (shuttingDown) process.exit(1);
+  shuttingDown = true;
   console.log(`\n${signal} received, shutting down gracefully...`);
-  if (server) {
-    server.close(() => {
-      console.log('HTTP server closed');
-      client.close().then(() => {
-        console.log('ClickHouse connection closed');
-        process.exit(0);
-      }).catch(() => {
-        process.exit(0);
-      });
-    });
-  } else {
-    process.exit(0);
-  }
+  if (!server) process.exit(0);
 
-  // Force exit after 10 seconds if graceful shutdown fails
+  // Force exit if graceful shutdown stalls
   setTimeout(() => {
     console.error('Forcing shutdown after timeout');
     process.exit(1);
-  }, 10000);
+  }, 5000).unref();
+
+  server.close(() => {
+    console.log('HTTP server closed');
+    Promise.resolve(activeClient?.close())
+      .then(() => console.log('ClickHouse connection closed'))
+      .catch(() => {})
+      .finally(() => process.exit(0));
+  });
+  // close() waits for keep-alive connections (browser polling, the Vite proxy); drop them
+  server.closeIdleConnections();
+  setTimeout(() => server.closeAllConnections(), 1000).unref();
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+
+// Checks and queries are loaded from the client folder in the repo, so the
+// app never edits them; change the files and redeploy instead.
+function readOnlyClientConfig(req, res) {
+  res.status(403).json({ error: 'Read-only: checks and queries are loaded from the client folder in the repo. Change them there.' });
+}
+app.put('/api/my-queries/update', readOnlyClientConfig);
+app.post('/api/my-queries/clone', readOnlyClientConfig);
+app.put('/api/alerts/update', readOnlyClientConfig);
+app.post('/api/alerts/clone', readOnlyClientConfig);
 
 // ==================== ALERTS ROUTES ====================
 app.get('/api/alerts/exists', (req, res) => {
@@ -5544,10 +5751,14 @@ app.get('/api/alerts', (req, res) => {
         lastRunTime: null, lastDuration: null, lastRowCount: null, runCount: 0,
       };
 
+      const meta = checkMeta(parseSqlHeader(content).meta);
       return {
         filename,
         query: content,
-        description: readDescription(alertsPath, filename),
+        title: meta.title,
+        description: meta.description || readDescription(alertsPath, filename),
+        severity: meta.severity,
+        category: meta.category,
         lastRunTime: agg.lastRunTime,
         lastDuration: agg.lastDuration,
         lastRowCount: agg.lastRowCount,
@@ -5560,7 +5771,7 @@ app.get('/api/alerts', (req, res) => {
 
     res.json({ alerts, path: alertsPath });
   } catch (error) {
-    console.error('Error reading alerts folder:', error);
+    console.error('Error reading monitoring folder:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5689,64 +5900,7 @@ app.get('/api/alerts/run-log/:filename', async (req, res) => {
   }
 });
 
-app.put('/api/alerts/update', (req, res) => {
-  try {
-    const { filename, query, description } = req.body;
-    if (!filename || !query) {
-      return res.status(400).json({ error: 'Filename and query are required' });
-    }
-    if (!filename.endsWith('.sql') || filename.includes('/') || filename.includes('\\')) {
-      return res.status(400).json({ error: 'Invalid filename' });
-    }
-    const alertsPath = getAlertsPath();
-    const filePath = path.join(alertsPath, filename);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Alert file not found' });
-    }
-    fs.writeFileSync(filePath, query.trim() + '\n', 'utf-8');
-    if (description !== undefined) {
-      writeDescription(alertsPath, filename, description);
-    }
-    res.json({ success: true, filename });
-  } catch (error) {
-    console.error('Error updating alert:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
-app.post('/api/alerts/clone', (req, res) => {
-  try {
-    const { sourceFilename, newFilename, query } = req.body;
-    if (!sourceFilename || !newFilename || !query) {
-      return res.status(400).json({ error: 'Source filename, new filename, and query are required' });
-    }
-    if (!newFilename.endsWith('.sql') || newFilename.includes('/') || newFilename.includes('\\')) {
-      return res.status(400).json({ error: 'Invalid filename' });
-    }
-    const alertsPath = getAlertsPath();
-    const newFilePath = path.join(alertsPath, newFilename);
-
-    if (fs.existsSync(newFilePath)) {
-      let counter = 1;
-      let uniqueFilename = newFilename;
-      let uniqueFilePath = newFilePath;
-      while (fs.existsSync(uniqueFilePath)) {
-        const baseName = newFilename.replace(/\.sql$/, '');
-        uniqueFilename = `${baseName}_${counter}.sql`;
-        uniqueFilePath = path.join(alertsPath, uniqueFilename);
-        counter++;
-      }
-      fs.writeFileSync(uniqueFilePath, query.trim() + '\n', 'utf-8');
-      return res.json({ success: true, filename: uniqueFilename });
-    }
-
-    fs.writeFileSync(newFilePath, query.trim() + '\n', 'utf-8');
-    res.json({ success: true, filename: newFilename });
-  } catch (error) {
-    console.error('Error cloning alert:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 
 // ==================== END ALERTS ROUTES ====================

@@ -5,6 +5,7 @@ import type { ColDef, ICellRendererParams, FirstDataRenderedEvent } from 'ag-gri
 import { Eye, X } from 'lucide-react';
 import { fetchDataSkippingIndexes, type DataSkippingIndex } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -123,7 +124,7 @@ export function DataSkippingIndexesTab({ filters, search }: DataSkippingIndexesT
 
   return (
     <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-      <AgGridReact<DataSkippingIndex>
+      <AgGridReact<DataSkippingIndex> {...GRID_OVERLAYS}
         theme={gridTheme}
         rowData={indexes}
         columnDefs={columnDefs}

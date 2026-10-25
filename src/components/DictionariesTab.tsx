@@ -6,6 +6,7 @@ import { Eye, X } from 'lucide-react';
 import { fetchDictionaries, type SystemDictionary } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
 import { formatBytes, formatNumber } from '../utils/formatters';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -164,7 +165,7 @@ export function DictionariesTab({ filters, search }: DictionariesTabProps) {
 
   return (
     <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
-      <AgGridReact<SystemDictionary>
+      <AgGridReact<SystemDictionary> {...GRID_OVERLAYS}
         theme={gridTheme}
         rowData={dictionaries}
         columnDefs={columnDefs}

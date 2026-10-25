@@ -38,7 +38,28 @@ environments:
 
 Every environment needs a `host` — QueryDog refuses to start and names the offending entry if one is blank. To reach a ClickHouse running on your own machine, use `host.docker.internal` rather than `localhost`: inside the container `localhost` is the container itself. Use `localhost` only when running QueryDog directly with `npm run dev`.
 
-`querydog.yml.example` documents the optional settings (`cluster`, `queries_folder`, `tls_reject_unauthorized`).
+`querydog.yml.example` is a complete example; [docs/README.md](docs/README.md) lists every option.
+
+### Client folder
+
+Checks and queries are loaded read-only from a client folder in the repo, chosen with `client:` in `querydog.yml` (default `clienta`, or set `QUERYDOG_CLIENT`). Change them by editing the files and redeploying; the UI does not edit them.
+
+| Folder | Contents |
+|---|---|
+| `monitoring/` | `.sql` checks, each with an optional `.md` description. A check returns rows when something needs attention. |
+| `alerts/` | `rules.yml`: how each monitoring check alerts (severity, schedule, operator, threshold, pending minutes, channel names). |
+| `performance/` | `.sql` queries whose run time is tracked over time. |
+| `dataquality/` | `.sql` assertions that return failing rows. Optional `-- key: value` header lines set name, table, severity and schedule. |
+
+`folders:` in `querydog.yml` can point any of these somewhere else.
+
+### Scheduler
+
+The `scheduler:` section of `querydog.yml` runs the monitoring checks, data quality checks, performance queries and recommendations on a timer against every configured environment (or the ones you list). It calls the same API as Run / Run all in the UI, so scheduled and manual runs behave identically. Each environment can opt out with `scheduler: false` or override job intervals with its own `scheduler: { jobs: ... }`. See [docs/README.md](docs/README.md) for the options; Settings › Scheduler shows the configuration, each job's last and next run per environment, and the log.
+
+### Storage
+
+Settings, run history (with the environment of every run), recommendations, alerting state and the scheduler log are stored in a SQLite database at `data/querydog.db` (`QUERYDOG_DATA_DIR` moves it). It uses Node's built-in `node:sqlite`, so there is nothing to install; under Docker Compose it lives in the `querydog-data` volume. JSON files from earlier versions in `data/` are imported once on startup and renamed to `*.migrated`.
 
 <details>
 <summary><strong>Connecting to a ClickHouse on your own machine (Linux)</strong></summary>

@@ -6,7 +6,17 @@ export function SearchBar() {
   const { search, setSearch } = useQueryStore();
   const [localSearch, setLocalSearch] = useState(search);
 
+  // Follow changes made elsewhere (Clear all, clicking a chart point, "List All")
+  const [lastStoreSearch, setLastStoreSearch] = useState(search);
+  if (search !== lastStoreSearch) {
+    setLastStoreSearch(search);
+    setLocalSearch(search);
+  }
+
+  // Debounce typing into the store. Only write when the text differs, so
+  // mounting the bar (e.g. on returning to the page) doesn't reset paging/selection.
   useEffect(() => {
+    if (localSearch === useQueryStore.getState().search) return;
     const timer = setTimeout(() => {
       setSearch(localSearch);
     }, 300);
@@ -21,7 +31,7 @@ export function SearchBar() {
         value={localSearch}
         onChange={(e) => setLocalSearch(e.target.value)}
         placeholder="Search query or query_id..."
-        className="bg-gray-800 border border-gray-600 rounded pl-6 pr-6 py-0.5 text-white text-xs w-64"
+        className="bg-gray-800 border border-gray-600 rounded pl-6 pr-6 py-0.5 text-white text-xs w-64 focus:outline-none focus:border-blue-500"
       />
       {localSearch && (
         <button

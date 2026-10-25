@@ -120,7 +120,7 @@ export function createColumnsFromMetadata(metadata: ColumnMetadata[], tableName:
 
 // Fallback columns if metadata fetch fails
 export const FALLBACK_COLUMNS: ColumnConfig[] = [
-  { field: 'event_time', headerName: 'Event Time', comment: 'Query starting time.', type: 'DateTime', visible: true, width: 195, sortable: true },
+  { field: 'event_time', headerName: 'Event Time', comment: 'Query starting time.', type: 'DateTime', visible: true, width: 215, sortable: true },
   { field: 'query_id', headerName: 'Query ID', comment: 'ID of the query.', type: 'String', visible: true, width: 200, sortable: true },
   { field: 'query', headerName: 'Query', comment: 'Query string.', type: 'String', visible: true, width: 350, sortable: false },
   { field: 'query_duration_ms', headerName: 'Duration', comment: 'Duration of query execution in milliseconds.', type: 'UInt64', visible: true, width: 90, sortable: true },
@@ -131,7 +131,7 @@ export const FALLBACK_COLUMNS: ColumnConfig[] = [
 
 // Fallback columns for part_log
 export const FALLBACK_PART_LOG_COLUMNS: ColumnConfig[] = [
-  { field: 'event_time', headerName: 'Event Time', comment: 'Time of the event.', type: 'DateTime', visible: true, width: 195, sortable: true },
+  { field: 'event_time', headerName: 'Event Time', comment: 'Time of the event.', type: 'DateTime', visible: true, width: 215, sortable: true },
   { field: 'event_type', headerName: 'Event Type', comment: 'Type of the event.', type: 'String', visible: true, width: 240, sortable: true },
   { field: 'database', headerName: 'Database', comment: 'Name of the database.', type: 'String', visible: true, width: 120, sortable: true },
   { field: 'table', headerName: 'Table', comment: 'Name of the table.', type: 'String', visible: true, width: 150, sortable: true },

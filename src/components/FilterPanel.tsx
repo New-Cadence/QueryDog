@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Filter, X, ChevronDown, ChevronRight } from 'lucide-react';
-import { useQueryStore } from '../stores/queryStore';
+import { useQueryStore, countActiveFilters } from '../stores/queryStore';
 import { fetchDistinctValues } from '../services/api';
 import { formatBytes, formatDuration } from '../utils/formatters';
+import { LoadingState } from './ui';
 
 // Range filter configuration
 const RANGE_FILTERS = [
@@ -25,26 +26,51 @@ const FILTERABLE_FIELDS = [
   { field: 'used_table_functions', label: 'Table Functions', isArray: true },
 ];
 
+const FILTERABLE_FIELD_NAMES = new Set(FILTERABLE_FIELDS.map((f) => f.field));
+
+// Filters set from elsewhere in the UI (e.g. "List All" on a grouped query)
+// that have no picker of their own; listed so they can be seen and cleared.
+const HIDDEN_FILTER_LABELS: Record<string, string> = {
+  query: 'Exact Query',
+  normalized_query_hash: 'Query Pattern',
+  primary_table: 'Primary Table',
+};
+
+// Range inputs only accept whole, non-negative numbers (the server binds them as UInt64)
+function parseRangeInput(value: string): number | undefined {
+  if (value.trim() === '') return undefined;
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) ? Math.max(0, n) : undefined;
+}
+
+// Keep currently selected values visible even when they fall outside the
+// loaded distinct values, so they can always be unticked.
+function withSelected(values: string[], selected: string[]): string[] {
+  const missing = selected.filter((v) => !values.includes(v));
+  return missing.length ? [...missing, ...values] : values;
+}
+
 export function FilterPanel() {
   const [isOpen, setIsOpen] = useState(false);
   const [expandedField, setExpandedField] = useState<string | null>(null);
   const [fieldValues, setFieldValues] = useState<Record<string, string[]>>({});
   const [loadingField, setLoadingField] = useState<string | null>(null);
-  const { fieldFilters, rangeFilters, setFieldFilter, setRangeFilter, clearFieldFilter, clearRangeFilter, clearAllFilters } = useQueryStore();
+  const { timeRange, fieldFilters, rangeFilters, setFieldFilter, setRangeFilter, clearFieldFilter, clearRangeFilter, clearAllFilters } = useQueryStore();
 
-  const activeFilterCount = Object.values(fieldFilters).filter((v) => v.length > 0).length +
-    Object.values(rangeFilters).filter((v) => v.min !== undefined || v.max !== undefined).length;
+  const activeFilterCount = countActiveFilters(fieldFilters, rangeFilters);
+  const hiddenFilters = Object.entries(fieldFilters).filter(([field, values]) => !FILTERABLE_FIELD_NAMES.has(field) && values.length > 0);
 
   const loadFieldValues = async (field: string) => {
     if (fieldValues[field]) return;
 
     setLoadingField(field);
     try {
-      // Use a wider time range for distinct values (last 24 hours from now)
-      // This ensures filter options aren't restricted by a narrow time range selection
+      // Offer values from at least the last 24 hours so options aren't limited by a
+      // narrow selection, while still covering the whole range when it is wider or older
+      const now = Date.now();
       const widerTimeRange = {
-        start: new Date(Date.now() - 24 * 60 * 60 * 1000),
-        end: new Date(),
+        start: new Date(Math.min(timeRange.start.getTime(), now - 24 * 60 * 60 * 1000)),
+        end: new Date(Math.max(timeRange.end.getTime(), now)),
       };
       const values = await fetchDistinctValues(field, widerTimeRange);
       setFieldValues((prev) => ({ ...prev, [field]: values }));
@@ -116,6 +142,20 @@ export function FilterPanel() {
               </div>
             </div>
             <div className="max-h-96 overflow-y-auto">
+              {hiddenFilters.map(([field, values]) => (
+                <div key={field} className="flex items-center justify-between gap-2 p-2 border-b border-gray-700/50">
+                  <div className="min-w-0">
+                    <div className="text-xs text-gray-300">{HIDDEN_FILTER_LABELS[field] || field}</div>
+                    <div className="text-[10px] text-gray-500 font-mono truncate max-w-[220px]" title={values.join(', ')}>
+                      {values.join(', ')}
+                    </div>
+                  </div>
+                  <button onClick={() => clearFieldFilter(field)} className="text-xs text-red-400 hover:text-red-300 shrink-0">
+                    Clear
+                  </button>
+                </div>
+              ))}
+
               {/* Range Filters */}
               {RANGE_FILTERS.map(({ field, label, unit, presets }) => {
                 const rangeFilter = rangeFilters[field] || {};
@@ -155,7 +195,9 @@ export function FilterPanel() {
                           <input
                             type="number"
                             value={rangeFilter.min ?? ''}
-                            onChange={(e) => setRangeFilter(field, { ...rangeFilter, min: e.target.value ? Number(e.target.value) : undefined })}
+                            min={0}
+                            step={1}
+                            onChange={(e) => setRangeFilter(field, { ...rangeFilter, min: parseRangeInput(e.target.value) })}
                             className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs text-white"
                             placeholder={unit === 'bytes' ? 'bytes' : 'ms'}
                           />
@@ -165,7 +207,9 @@ export function FilterPanel() {
                           <input
                             type="number"
                             value={rangeFilter.max ?? ''}
-                            onChange={(e) => setRangeFilter(field, { ...rangeFilter, max: e.target.value ? Number(e.target.value) : undefined })}
+                            min={0}
+                            step={1}
+                            onChange={(e) => setRangeFilter(field, { ...rangeFilter, max: parseRangeInput(e.target.value) })}
                             className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs text-white"
                             placeholder={unit === 'bytes' ? 'bytes' : 'ms'}
                           />
@@ -199,7 +243,7 @@ export function FilterPanel() {
               {FILTERABLE_FIELDS.map(({ field, label, isArray }) => {
                 const selectedValues = fieldFilters[field] || [];
                 const isExpanded = expandedField === field;
-                const values = fieldValues[field] || [];
+                const values = withSelected(fieldValues[field] || [], selectedValues);
 
                 return (
                   <div key={field} className="border-b border-gray-700/50 last:border-0">
@@ -228,7 +272,7 @@ export function FilterPanel() {
                     {isExpanded && (
                       <div className="px-2 pb-2">
                         {loadingField === field ? (
-                          <div className="text-xs text-gray-400 py-2 text-center">Loading...</div>
+                          <LoadingState compact />
                         ) : values.length === 0 ? (
                           <div className="text-xs text-gray-400 py-2 text-center">No values</div>
                         ) : (

@@ -1,1 +1,0 @@
-Reports insert throttling and rejection event counters per host alongside server uptime, computing a rough rate per second. Surfaces hosts where inserts are being delayed or rejected, often due to too-many-parts back-pressure.

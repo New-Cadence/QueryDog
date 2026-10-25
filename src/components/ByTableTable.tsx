@@ -7,6 +7,8 @@ import { useQueryStore } from '../stores/queryStore';
 import { fetchByTableStats, type ByTableEntry } from '../services/api';
 import { useGridTheme } from '../hooks/useTheme';
 import { formatBytes, formatNumber, formatDuration, formatDateTime } from '../utils/formatters';
+import { LoadingState } from './ui';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -216,7 +218,7 @@ export function ByTableTable() {
     {
       headerName: 'Last Seen',
       field: 'last_seen',
-      width: 140,
+      width: 175,
       sortable: true,
       valueFormatter: (params) => formatDateTime(params.value),
       cellStyle: { color: '#fca5a5' },
@@ -243,10 +245,10 @@ export function ByTableTable() {
   return (
     <div className="h-full flex flex-col">
       {loading && (
-        <div className="absolute top-2 right-2 text-xs text-blue-400">Loading...</div>
+        <div className="absolute top-2 right-2 z-10"><LoadingState compact /></div>
       )}
       <div className="flex-1 ag-theme-alpine-dark" style={{ width: '100%' }}>
-        <AgGridReact<ByTableEntry>
+        <AgGridReact<ByTableEntry> {...GRID_OVERLAYS}
           rowData={data}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}

@@ -1,1 +1,0 @@
-Lists merges that have been running for more than 30 minutes, with elapsed time, progress, part counts, source size, memory usage, and merge type. Helpful for spotting merges that are stuck or making no progress.

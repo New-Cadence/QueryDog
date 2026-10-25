@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Users, Shield, Key, Gauge, Lock, Clock } from 'lucide-react';
 import { SystemTable } from '../SystemTable';
+import { ToolbarSlot } from '../ToolbarSlot';
+import { PageTabs } from '../ui';
 import {
   fetchUsers,
   fetchUsersColumns,
@@ -28,6 +30,7 @@ type QuotasSubTab = 'quotas' | 'quota-usage' | 'quota-limits';
 
 export function UsersPage() {
   const [activeTab, setActiveTab] = useState<UsersTab>('users');
+  const [toolbarEl, setToolbarEl] = useState<HTMLDivElement | null>(null);
   const [rolesSubTab, setRolesSubTab] = useState<RolesSubTab>('roles');
   const [quotasSubTab, setQuotasSubTab] = useState<QuotasSubTab>('quotas');
 
@@ -53,25 +56,8 @@ export function UsersPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="bg-gray-900/50 border-b border-gray-700 px-1.5 h-9 flex items-center justify-between shrink-0">
-        <div />
-      </div>
-      <div className="border-b border-gray-700 px-1.5 flex items-center gap-1 shrink-0">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
-              activeTab === id
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            <Icon className="w-3 h-3" />
-            {label}
-          </button>
-        ))}
-      </div>
+      <ToolbarSlot ref={setToolbarEl} />
+      <PageTabs tabs={tabs} active={activeTab} onChange={setActiveTab} />
 
       <div className="flex-1 overflow-hidden px-1.5 pt-3 pb-4 flex flex-col">
         {activeTab === 'users' && (
@@ -80,6 +66,7 @@ export function UsersPage() {
             fetchColumns={fetchUsersColumns}
             getRowId={(data) => String(data.name)}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
 
@@ -89,6 +76,7 @@ export function UsersPage() {
             fetchColumns={fetchGrantsColumns}
             getRowId={(data) => `${data.user_name}-${data.role_name}-${data.access_type}-${data.database}-${data.table}`}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
 
@@ -116,6 +104,7 @@ export function UsersPage() {
                   fetchColumns={fetchRolesColumns}
                   getRowId={(data) => String(data.name)}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
               {rolesSubTab === 'role-grants' && (
@@ -124,6 +113,7 @@ export function UsersPage() {
                   fetchColumns={fetchRoleGrantsColumns}
                   getRowId={(data) => `${data.user_name}-${data.role_name}-${data.granted_role_name}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
             </div>
@@ -154,6 +144,7 @@ export function UsersPage() {
                   fetchColumns={fetchQuotasColumns}
                   getRowId={(data) => String(data.name)}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
               {quotasSubTab === 'quota-usage' && (
@@ -162,6 +153,7 @@ export function UsersPage() {
                   fetchColumns={fetchQuotaUsageColumns}
                   getRowId={(data) => `${data.quota_name}-${data.quota_key}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
               {quotasSubTab === 'quota-limits' && (
@@ -170,6 +162,7 @@ export function UsersPage() {
                   fetchColumns={fetchQuotaLimitsColumns}
                   getRowId={(data) => `${data.quota_name}-${data.duration}`}
                   hideHeader
+                  toolbarContainer={toolbarEl}
                 />
               )}
             </div>
@@ -182,6 +175,7 @@ export function UsersPage() {
             fetchColumns={fetchRowPoliciesColumns}
             getRowId={(data) => `${data.short_name}-${data.database}-${data.table_name}`}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
 
@@ -191,6 +185,7 @@ export function UsersPage() {
             fetchColumns={fetchSessionLogColumns}
             getRowId={(data) => `${data.session_id}-${data.event_time}`}
             hideHeader
+            toolbarContainer={toolbarEl}
           />
         )}
       </div>

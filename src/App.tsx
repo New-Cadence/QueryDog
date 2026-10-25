@@ -1,17 +1,25 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Dog, Database, HardDrive, Activity, Server, X, FolderTree, Terminal, FileText, Layers, FileCode, Table, AlertTriangle, Bell, Users, Network, Circle, RefreshCw, Sun, Moon } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { LogOut, Database, HardDrive, Activity, Server, X, FolderTree, Terminal, FileText, Layers, Table, AlertTriangle, Network, Circle, RefreshCw, Settings, Radar, Lightbulb, FlaskConical, Zap, BookOpen, ShieldCheck, BellRing, NotebookPen, CircleDollarSign, BadgeCheck, KeyRound, Gauge } from 'lucide-react';
 import { AutoRefreshToggle } from './components/AutoRefreshToggle';
 import { QueriesPage } from './components/pages/QueriesPage';
 import { PartsPage } from './components/pages/PartsPage';
 import { PartLogPage } from './components/pages/PartLogPage';
 import { ActivityPage } from './components/pages/ActivityPage';
 import { InstancePage } from './components/pages/InstancePage';
-import { UsersPage } from './components/pages/UsersPage';
 import { ClusterPage } from './components/pages/ClusterPage';
 import { TextLogPage } from './components/pages/TextLogPage';
 import { MyQueriesPage } from './components/pages/MyQueriesPage';
 import { DataExplorerPage } from './components/pages/DataExplorerPage';
-import { AlertsPage } from './components/pages/AlertsPage';
+import { AlertingPage } from './components/pages/AlertingPage';
+import { DataDictionaryPage } from './components/pages/DataDictionaryPage';
+import { DataQualityPage } from './components/pages/DataQualityPage';
+import { SecurityPage } from './components/pages/SecurityPage';
+import { NotebooksPage } from './components/pages/NotebooksPage';
+import { LoadTestingPage } from './components/pages/LoadTestingPage';
+import { CostPage } from './components/pages/CostPage';
+import { RecommendationsPage } from './components/pages/RecommendationsPage';
+import { SettingsPage } from './components/pages/SettingsPage';
+import { ClientFolderNotice } from './components/ClientFolderNotice';
 import { ProfileEventsModal } from './components/ProfileEventsModal';
 import { DatabaseBrowser } from './components/DatabaseBrowser';
 import { DatabaseManager } from './components/DatabaseManager';
@@ -19,8 +27,51 @@ import { QueryEditor } from './components/QueryEditor';
 import { useQueryStore } from './stores/queryStore';
 import { useQueryData } from './hooks/useQueryData';
 import { fetchEnvironments, switchEnvironment, type EnvironmentInfo } from './services/api';
+import { useAuth } from './auth/authContext';
 
-type NavItem = 'queries' | 'textlog' | 'partlog' | 'parts' | 'activity' | 'users' | 'cluster' | 'instance' | 'myqueries' | 'alerts';
+// 'settings' is opened from the header gear button rather than the mode nav
+type Mode = 'observability' | 'recommendations' | 'checks' | 'dictionary' | 'security' | 'alerting' | 'notebooks' | 'cost' | 'settings';
+type NavItem =
+  // Observability
+  | 'queries' | 'textlog' | 'partlog' | 'parts' | 'activity' | 'cluster' | 'instance'
+  // Checks
+  | 'testing' | 'dataquality' | 'loadtesting'
+  // Data Dictionary
+  | 'dictionary' | 'browser' | 'explorer'
+  // Security
+  | 'security' | 'access' | 'quotas';
+
+// Each mode carries a full set of accent classes (spelled out so Tailwind picks them up)
+interface ModeDef {
+  id: Mode;
+  label: string;
+  icon: typeof Database;
+  description: string;
+  text: string;
+  tile: string;
+  bar: string;
+  // Kept in the code but not shown in the nav
+  hidden?: boolean;
+}
+
+const MODES: ModeDef[] = [
+  { id: 'observability', label: 'Observability', icon: Radar, description: 'Queries, parts, activity and instance health', text: 'text-blue-400', tile: 'bg-blue-500/15', bar: 'bg-blue-500' },
+  { id: 'alerting', label: 'Monitoring', icon: BellRing, description: 'Checks, rules, incidents and notification channels', text: 'text-orange-400', tile: 'bg-orange-500/15', bar: 'bg-orange-500' },
+  { id: 'checks', label: 'Testing', icon: FlaskConical, description: 'Query performance, data quality and load testing', text: 'text-green-400', tile: 'bg-green-500/15', bar: 'bg-green-500' },
+  { id: 'security', label: 'Security', icon: ShieldCheck, description: 'Role-based access control and posture', text: 'text-red-400', tile: 'bg-red-500/15', bar: 'bg-red-500' },
+  { id: 'cost', label: 'Cost', icon: CircleDollarSign, description: 'ClickHouse Cloud spend and forecasts', text: 'text-emerald-400', tile: 'bg-emerald-500/15', bar: 'bg-emerald-500' },
+  { id: 'notebooks', label: 'Notebooks', icon: NotebookPen, description: 'Interactive SQL notebooks', text: 'text-violet-400', tile: 'bg-violet-500/15', bar: 'bg-violet-500', hidden: true },
+  { id: 'dictionary', label: 'Data Dictionary', icon: BookOpen, description: 'Catalogue of databases, tables and columns', text: 'text-teal-400', tile: 'bg-teal-500/15', bar: 'bg-teal-500' },
+  { id: 'recommendations', label: 'Recommendations', icon: Lightbulb, description: 'Prioritised fixes across cost, security, performance and schema', text: 'text-amber-400', tile: 'bg-amber-500/15', bar: 'bg-amber-500' },
+];
+
+// Default sub-page for modes that have a secondary navigation row
+const DEFAULT_NAV: Partial<Record<Mode, NavItem>> = {
+  observability: 'queries',
+  checks: 'testing',
+  dictionary: 'dictionary',
+  security: 'security',
+};
 type RefreshInterval = 'off' | 5 | 10 | 60 | 600;
 
 interface ConnectionInfo {
@@ -63,14 +114,23 @@ function resolveEnvFromUrl(envs: EnvironmentInfo[]): number {
 }
 
 function App() {
+  const { authEnabled, user, logout } = useAuth();
+  // Always land on Observability > Queries when the app starts
+  const [mode, setModeState] = useState<Mode>('observability');
   const [navItem, setNavItem] = useState<NavItem>('queries');
+  const setMode = useCallback((next: Mode) => {
+    setModeState(next);
+    const nav = DEFAULT_NAV[next];
+    if (nav) setNavItem(nav);
+  }, []);
   const [refreshInterval, setRefreshInterval] = useState<RefreshInterval>('off');
   const [lightMode, setLightMode] = useState(() => {
     const saved = localStorage.getItem('querydog_theme');
     return saved === 'light';
   });
 
-  // Apply theme class to root element
+  // Apply theme class to root element. The theme is saved in the database
+  // (Settings > Appearance); localStorage only avoids a flash on load.
   useEffect(() => {
     if (lightMode) {
       document.documentElement.classList.add('light');
@@ -79,6 +139,20 @@ function App() {
     }
     localStorage.setItem('querydog_theme', lightMode ? 'light' : 'dark');
   }, [lightMode]);
+  useEffect(() => {
+    fetch('/api/settings/appearance')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d?.value?.theme) setLightMode(d.value.theme === 'light'); })
+      .catch(() => {});
+  }, []);
+  const changeTheme = useCallback((light: boolean) => {
+    setLightMode(light);
+    fetch('/api/settings/appearance', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: { theme: light ? 'light' : 'dark' } }),
+    }).catch(() => {});
+  }, []);
   // Show about modal on first visit only (check cookie)
   const [aboutOpen, setAboutOpen] = useState(() => {
     const hasVisited = getCookie('querydog_visited');
@@ -88,8 +162,6 @@ function App() {
     }
     return false;
   });
-  const [browserOpen, setBrowserOpen] = useState(false);
-  const [dataExplorerOpen, setDataExplorerOpen] = useState(false);
   const [queryEditorOpen, setQueryEditorOpen] = useState(false);
   const [queryEditorInitialQuery, setQueryEditorInitialQuery] = useState('');
   const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
@@ -115,7 +187,15 @@ function App() {
     setError,
   } = useQueryStore();
   const connectionReady = !!connectionInfo && !backendError;
-  const { refresh } = useQueryData(connectionReady);
+  // Observability data only loads (and auto-refreshes) while that mode is open
+  // The header Refresh reloads whatever screen is open: the page is remounted
+  // so it fetches again, and the query log data held here is reloaded too
+  const [refreshCount, setRefreshCount] = useState(0);
+  const { refresh } = useQueryData(connectionReady && mode === 'observability', connectedEnvIndex);
+  const refreshAll = useCallback(() => {
+    setRefreshCount(c => c + 1);
+    if (mode === 'observability') refresh();
+  }, [mode, refresh]);
   const activeEnvName = environments[activeEnvIndex]?.name;
   const [initialConnectOpen, setInitialConnectOpen] = useState(true);
   const [checkedExistingConnection, setCheckedExistingConnection] = useState(false);
@@ -279,6 +359,13 @@ function App() {
     };
   }, []);
 
+  // Expose mode navigation so pages can link to each other (e.g. to Recommendations)
+  useEffect(() => {
+    (window as unknown as { navigateToMode: (mode: Mode) => void }).navigateToMode = (next: Mode) => {
+      if (MODES.some(m => m.id === next)) setMode(next);
+    };
+  }, [setMode]);
+
   // Expose function to navigate to Queries page filtered by query_id
   useEffect(() => {
     (window as unknown as { navigateToQueryId: (queryId: string) => void }).navigateToQueryId = (queryId: string) => {
@@ -290,10 +377,11 @@ function App() {
       const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
       setTimeRange({ start, end });
       // Navigate to queries page
+      setMode('observability');
       setNavItem('queries');
       setActiveTab('queries');
     };
-  }, [clearAllFilters, setFieldFilter, setTimeRange, setActiveTab]);
+  }, [clearAllFilters, setFieldFilter, setTimeRange, setActiveTab, setMode]);
 
   // Expose function to navigate to Queries page filtered by multiple query_ids
   useEffect(() => {
@@ -307,25 +395,24 @@ function App() {
       const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
       setTimeRange({ start, end });
       // Navigate to queries page
+      setMode('observability');
       setNavItem('queries');
       setActiveTab('queries');
     };
-  }, [clearAllFilters, setFieldFilter, setTimeRange, setActiveTab]);
+  }, [clearAllFilters, setFieldFilter, setTimeRange, setActiveTab, setMode]);
 
   // Global auto-refresh
   useEffect(() => {
-    if (refreshInterval === 'off') return;
+    if (refreshInterval === 'off' || mode !== 'observability') return;
     const interval = setInterval(refresh, refreshInterval * 1000);
     return () => clearInterval(interval);
-  }, [refreshInterval, refresh]);
+  }, [refreshInterval, refresh, mode]);
 
   // Close modals on Escape key
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setAboutOpen(false);
-        setBrowserOpen(false);
-        setDataExplorerOpen(false);
         setQueryEditorOpen(false);
         setError(null);
         setBackendError(null);
@@ -342,26 +429,58 @@ function App() {
     }
   }, [backendError, setError]);
 
-  const navItems: { id: NavItem; label: string; icon: typeof Database }[] = [
-    { id: 'queries', label: 'Queries', icon: Database },
-    ...(hasPartsAccess ? [{ id: 'parts' as const, label: 'Objects', icon: HardDrive }] : []),
-    ...(hasPartLogAccess ? [{ id: 'partlog' as const, label: 'Parts Log', icon: Layers }] : []),
-    { id: 'activity', label: 'Activity', icon: Activity },
-    { id: 'instance', label: 'Instance', icon: Server },
-    { id: 'textlog', label: 'Text Log', icon: FileText },
-    { id: 'users', label: 'Users', icon: Users },
-    { id: 'cluster', label: 'Cluster', icon: Network },
-    ...(hasQueriesFolder ? [{ id: 'myqueries' as const, label: 'My Queries', icon: FileCode }] : []),
-    ...(hasAlertsFolder ? [{ id: 'alerts' as const, label: 'Alerts', icon: Bell }] : []),
-  ];
+  const navItemsByMode: Partial<Record<Mode, { id: NavItem; label: string; icon: typeof Database; description: string }[]>> = {
+    observability: [
+      { id: 'queries', label: 'Queries', icon: Database, description: 'Query log timeline, grouping and profiling' },
+      ...(hasPartsAccess ? [{ id: 'parts' as const, label: 'Objects', icon: HardDrive, description: 'Tables, partitions, parts and indexes' }] : []),
+      ...(hasPartLogAccess ? [{ id: 'partlog' as const, label: 'Parts Log', icon: Layers, description: 'Merges, mutations and part events' }] : []),
+      { id: 'activity', label: 'Activity', icon: Activity, description: 'Running queries, merges and background jobs' },
+      { id: 'instance', label: 'Instance', icon: Server, description: 'Metrics, settings, disks and errors' },
+      { id: 'textlog', label: 'Text Log', icon: FileText, description: 'Server log messages' },
+      { id: 'cluster', label: 'Cluster', icon: Network, description: 'Replicas and cluster topology' },
+    ],
+    checks: [
+      { id: 'testing', label: 'Query Performance', icon: FlaskConical, description: 'Track saved query performance over time' },
+      { id: 'dataquality', label: 'Data Quality', icon: BadgeCheck, description: 'Data quality checks and dataset compliance' },
+      { id: 'loadtesting', label: 'Load Testing', icon: Zap, description: 'Simulate concurrent workloads' },
+    ],
+    security: [
+      { id: 'security', label: 'Security', icon: ShieldCheck, description: 'Posture and access changes' },
+      { id: 'access', label: 'Access', icon: KeyRound, description: 'Who can access what, and logins' },
+      { id: 'quotas', label: 'Quotas', icon: Gauge, description: 'Row policies, quotas and settings profiles' },
+    ],
+    dictionary: [
+      { id: 'dictionary', label: 'Catalog', icon: BookOpen, description: 'Documented tables and columns' },
+      { id: 'browser', label: 'Database Browser', icon: FolderTree, description: 'Tree and graph of every object' },
+      { id: 'explorer', label: 'Data Explorer', icon: Table, description: 'Slice and group table data' },
+    ],
+  };
+
+  // Header dropdown menus
+  const [openMenu, setOpenMenu] = useState<Mode | null>(null);
+  const menuRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpenMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpenMenu(null);
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [openMenu]);
 
   return (
     <div className="h-screen bg-gray-950 text-white flex flex-col overflow-hidden">
-      {/* Header */}
-      <header className="bg-gray-900 border-b border-gray-700 px-3 sm:px-4 py-1.5 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-6">
+      {/* Header: modes, with dropdowns for modes that contain several pages */}
+      <header className="bg-[var(--brand-surface)] border-b border-[var(--brand-surface-border)] px-3 sm:px-4 h-14 flex items-stretch justify-between gap-4 shrink-0">
+        <div className="flex items-stretch gap-5 min-w-0">
           <button
             onClick={() => {
+              setMode('observability');
               setNavItem('queries');
               setActiveTab('queries');
               setChartMetric('count');
@@ -370,48 +489,82 @@ function App() {
               const start = new Date(end.getTime() - 60 * 60 * 1000);
               setTimeRange({ start, end });
             }}
-            className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+            className="self-center flex items-start gap-2 hover:opacity-80 transition-opacity shrink-0"
           >
-            <Dog className="w-5 h-5 text-blue-400" />
-            <h1 className="text-base font-bold text-white">Query Dog</h1>
+            <span className="w-[13px] h-[13px] mt-px bg-[var(--brand-accent)] shrink-0" aria-hidden="true" />
+            <span className="flex flex-col items-start leading-none">
+              <h1 className="text-[17px] font-bold text-white whitespace-nowrap">Convoy</h1>
+              <span className="text-[10px] text-gray-500 font-medium tracking-tight mt-0.5">by New Cadence</span>
+            </span>
           </button>
 
-          {/* Top Navigation */}
-          <nav className="flex items-center gap-1">
-            {navItems.map(({ id, label, icon: Icon }) => (
-              <button
-                key={id}
-                onClick={() => setNavItem(id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors ${
-                  navItem === id
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-800'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                {label}
-              </button>
-            ))}
+          <div className="w-px bg-[var(--brand-surface-border)] my-4" />
+
+          <nav ref={menuRef} className="flex items-stretch gap-1 min-w-0">
+            {MODES.filter(m => !m.hidden).map(m => {
+              const active = mode === m.id;
+              const items = navItemsByMode[m.id] || [];
+              const hasMenu = items.length > 0;
+              return (
+                <div key={m.id} className="relative flex items-stretch">
+                  <button
+                    onClick={() => {
+                      if (hasMenu) setOpenMenu(prev => (prev === m.id ? null : m.id));
+                      else { setMode(m.id); setOpenMenu(null); }
+                    }}
+                    onMouseEnter={() => openMenu && hasMenu && setOpenMenu(m.id)}
+                    aria-haspopup={hasMenu ? 'menu' : undefined}
+                    aria-expanded={hasMenu ? openMenu === m.id : undefined}
+                    className={`relative flex items-center gap-2 px-3 text-sm font-semibold tracking-tight whitespace-nowrap transition-colors rounded-t ${
+                      active ? 'text-white' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60'
+                    } ${openMenu === m.id ? 'bg-gray-800/60' : ''}`}
+                  >
+                    <span className={`w-6 h-6 rounded-md flex items-center justify-center transition-colors ${active ? m.tile : ''}`}>
+                      <m.icon className={`w-4 h-4 ${m.text}`} />
+                    </span>
+                    <span className="hidden xl:inline">{m.label}</span>
+                    {active && <span className={`absolute left-1.5 right-1.5 -bottom-px h-0.5 rounded-full ${m.bar}`} />}
+                  </button>
+                  {openMenu === m.id && (
+                    <div role="menu" className="absolute left-0 top-full mt-1 z-50 w-72 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl p-1.5">
+                      <div className={`px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wider ${m.text}`}>{m.label}</div>
+                      {items.map(item => {
+                        const selected = active && navItem === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            role="menuitem"
+                            onClick={() => {
+                              setMode(m.id);
+                              setNavItem(item.id);
+                              setOpenMenu(null);
+                            }}
+                            aria-current={selected ? 'page' : undefined}
+                            className={`relative w-full flex items-start gap-2.5 px-2 py-1.5 rounded-md text-left transition-colors ${
+                              selected ? 'bg-gray-800' : 'hover:bg-gray-800/70'
+                            }`}
+                          >
+                            {selected && <span className={`absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full ${m.bar}`} />}
+                            <span className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${selected ? m.tile : 'bg-gray-800'}`}>
+                              <item.icon className={`w-3.5 h-3.5 ${selected ? m.text : 'text-gray-400'}`} />
+                            </span>
+                            <span className="min-w-0">
+                              <span className={`block text-xs font-medium ${selected ? 'text-white' : 'text-gray-200'}`}>{item.label}</span>
+                              <span className="block text-[11px] text-gray-500 truncate">{item.description}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </nav>
         </div>
 
+        <div className="flex items-stretch gap-3 shrink-0">
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setBrowserOpen(true)}
-            className="flex items-center gap-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 text-xs"
-            title="Database Browser"
-          >
-            <FolderTree className="w-3.5 h-3.5" />
-            Browse
-          </button>
-          <button
-            onClick={() => setDataExplorerOpen(true)}
-            className="flex items-center gap-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 text-xs"
-            title="Data Explorer"
-          >
-            <Table className="w-3.5 h-3.5" />
-            Data
-          </button>
           <button
             onClick={() => {
               setQueryEditorInitialQuery('');
@@ -424,40 +577,85 @@ function App() {
             Query
           </button>
           <button
-            onClick={() => setLightMode(!lightMode)}
-            className="p-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 hover:text-white"
-            title={lightMode ? 'Switch to dark mode' : 'Switch to light mode'}
-          >
-            {lightMode ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
-          </button>
-          <button
-            onClick={refresh}
-            className="p-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 hover:text-white"
-            title="Refresh data"
+            onClick={refreshAll}
+            className="p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+            title="Refresh: reload the data on this screen"
+            aria-label="Refresh"
           >
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
-          <AutoRefreshToggle
-            interval={refreshInterval}
-            onIntervalChange={setRefreshInterval}
-          />
+          {mode === 'observability' && (
+            <AutoRefreshToggle
+              interval={refreshInterval}
+              onIntervalChange={setRefreshInterval}
+            />
+          )}
+        </div>
+
+          <div className="w-px bg-[var(--brand-surface-border)] my-4" />
+
+          {/* Settings sits apart from the modes, styled as a top-level nav tab */}
+          <button
+            onClick={() => { setMode('settings'); setOpenMenu(null); }}
+            aria-current={mode === 'settings' ? 'page' : undefined}
+            className={`relative flex items-center gap-2 px-3 text-sm font-semibold tracking-tight whitespace-nowrap transition-colors rounded-t ${
+              mode === 'settings' ? 'text-white' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60'
+            }`}
+            title="Settings"
+            aria-label="Settings"
+          >
+            <span className={`w-6 h-6 rounded-md flex items-center justify-center transition-colors ${mode === 'settings' ? 'bg-gray-500/20' : ''}`}>
+              <Settings className="w-4 h-4 text-gray-400" />
+            </span>
+            {mode === 'settings' && <span className="absolute left-1.5 right-1.5 -bottom-px h-0.5 rounded-full bg-gray-400" />}
+          </button>
+          {authEnabled && (
+            <button
+              onClick={logout}
+              className="flex items-center px-2 text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 rounded-t transition-colors"
+              title={`Log out ${user}`}
+              aria-label="Log out"
+            >
+              <span className="w-6 h-6 rounded-md flex items-center justify-center"><LogOut className="w-4 h-4" /></span>
+            </button>
+          )}
         </div>
       </header>
 
-
       {/* Main Content */}
-      <main className="flex-1 overflow-hidden px-3 sm:px-4">
-        {navItem === 'queries' && <QueriesPage />}
-        {navItem === 'textlog' && <TextLogPage />}
-        {navItem === 'partlog' && <PartLogPage />}
-        {navItem === 'parts' && <PartsPage />}
-        {navItem === 'activity' && <ActivityPage />}
-
-        {navItem === 'users' && <UsersPage />}
-        {navItem === 'cluster' && <ClusterPage />}
-        {navItem === 'instance' && <InstancePage />}
-        {navItem === 'alerts' && <AlertsPage />}
-        {navItem === 'myqueries' && <MyQueriesPage />}
+      {/* Keyed on the connected environment so every page reloads its data after a switch */}
+      <main key={`${connectedEnvIndex ?? -1}:${refreshCount}`} className="flex-1 overflow-hidden px-3 sm:px-4">
+        {mode === 'observability' && (
+          <>
+            {navItem === 'queries' && <QueriesPage />}
+            {navItem === 'textlog' && <TextLogPage />}
+            {navItem === 'partlog' && <PartLogPage />}
+            {navItem === 'parts' && <PartsPage />}
+            {navItem === 'activity' && <ActivityPage />}
+            {navItem === 'cluster' && <ClusterPage />}
+            {navItem === 'instance' && <InstancePage />}
+          </>
+        )}
+        {mode === 'recommendations' && <RecommendationsPage />}
+        {mode === 'alerting' && <AlertingPage hasAlertsFolder={hasAlertsFolder} />}
+        {mode === 'checks' && navItem === 'testing' && (
+          hasQueriesFolder ? <MyQueriesPage /> : (
+            <ClientFolderNotice kind="performance" className="m-1.5 mt-3" />
+          )
+        )}
+        {mode === 'checks' && navItem === 'loadtesting' && <LoadTestingPage />}
+        {mode === 'checks' && navItem === 'dataquality' && <DataQualityPage />}
+        {mode === 'dictionary' && (
+          <>
+            {navItem === 'dictionary' && <DataDictionaryPage />}
+            {navItem === 'browser' && <DatabaseBrowser embedded />}
+            {navItem === 'explorer' && <DataExplorerPage />}
+          </>
+        )}
+        {mode === 'security' && (navItem === 'security' || navItem === 'access' || navItem === 'quotas') && <SecurityPage key={navItem} section={navItem} />}
+        {mode === 'notebooks' && <NotebooksPage />}
+        {mode === 'cost' && <CostPage />}
+        {mode === 'settings' && <SettingsPage lightMode={lightMode} onLightModeChange={changeTheme} />}
       </main>
 
       {/* Footer */}
@@ -466,7 +664,7 @@ function App() {
           onClick={() => setAboutOpen(true)}
           className="text-xs text-gray-400 hover:text-blue-400 hover:underline cursor-pointer"
         >
-          About Query Dog V0.3
+          Convoy V0.4 · New Cadence
         </button>
         <div className="flex items-center gap-3">
           {/* Connection status */}
@@ -480,6 +678,11 @@ function App() {
             <span className="flex items-center gap-1.5 text-xs text-gray-400 font-mono">
               <Circle className="w-2 h-2 fill-green-500 text-green-500" />
               {connectionInfo.name}: {connectionInfo.user}@{connectionInfo.host}:{connectionInfo.port}
+              {environments[connectedEnvIndex ?? activeEnvIndex]?.deployment === 'cloud' ? (
+                <span className="ml-1 px-1.5 py-px rounded border text-[10px] font-sans font-medium text-blue-400 bg-blue-900/40 border-blue-800">ClickHouse Cloud</span>
+              ) : environments[connectedEnvIndex ?? activeEnvIndex] && (
+                <span className="ml-1 px-1.5 py-px rounded border text-[10px] font-sans font-medium text-green-400 bg-green-900/40 border-green-800">Open Source</span>
+              )}
             </span>
           )}
           {!connecting && !switching && backendError && (
@@ -508,12 +711,6 @@ function App() {
       {/* Profile Events Modal */}
       <ProfileEventsModal />
 
-      {/* Database Browser Modal */}
-      {browserOpen && <DatabaseBrowser onClose={() => setBrowserOpen(false)} />}
-
-      {/* Data Explorer Modal */}
-      {dataExplorerOpen && <DataExplorerPage onClose={() => setDataExplorerOpen(false)} />}
-
       {/* Query Editor Modal */}
       {queryEditorOpen && (
         <QueryEditor
@@ -537,10 +734,10 @@ function App() {
               <X className="w-4 h-4" />
             </button>
             <div className="flex flex-col items-center gap-4">
-              <Dog className="w-12 h-12 text-blue-400" />
-              <h2 className="text-xl font-bold text-white">Query Dog V0.3</h2>
+              <span className="w-10 h-10 bg-[var(--brand-accent)]" aria-hidden="true" />
+              <h2 className="text-xl font-bold text-white">Convoy V0.4</h2>
               <p className="text-sm text-gray-300 text-center">
-                A tool for analysing the ClickHouse query log.
+                Monitor, test, secure and manage ClickHouse. Formerly Query Dog.
               </p>
               <p className="text-sm text-gray-400 text-center italic">
                 🎵 Who let the logs out... 🎵

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Database, Table, Loader2, AlertCircle, Play, X, ChevronDown, ChevronRight, BarChart3 } from 'lucide-react';
 import { fetchBrowserDatabases, fetchBrowserTables, fetchBrowserColumns, type BrowserDatabase, type BrowserTable, type BrowserColumn } from '../../services/api';
 import { formatNumber, formatDuration } from '../../utils/formatters';
+import { LoadingState, EmptyState } from '../ui';
 
 interface ExploreResult {
   columns: string[];
@@ -236,7 +237,7 @@ export function DataExplorerPage({ onClose }: DataExplorerPageProps) {
   };
 
   const content = (
-    <div className="bg-gray-900 border border-gray-700 rounded-lg w-[95vw] h-[90vh] overflow-hidden flex flex-col">
+    <div className={`bg-gray-900 border border-gray-700 rounded-lg overflow-hidden flex flex-col ${onClose ? 'w-[95vw] h-[90vh]' : 'w-full h-full'}`}>
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-gray-700 shrink-0">
         <div className="flex items-center gap-3">
@@ -366,9 +367,7 @@ export function DataExplorerPage({ onClose }: DataExplorerPageProps) {
 
               {/* Loading State */}
               {loading && (
-                <div className="flex items-center justify-center h-full">
-                  <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
-                </div>
+                <LoadingState label="Running query…" />
               )}
 
               {/* Empty State */}
@@ -456,9 +455,7 @@ export function DataExplorerPage({ onClose }: DataExplorerPageProps) {
               )}
 
               {profileLoading && (
-                <div className="flex items-center justify-center h-full">
-                  <Loader2 className="w-6 h-6 text-blue-500 animate-spin" />
-                </div>
+                <LoadingState label="Profiling…" />
               )}
 
               {profileError && (
@@ -532,7 +529,7 @@ export function DataExplorerPage({ onClose }: DataExplorerPageProps) {
                               })}
                             </div>
                           ) : (
-                            <div className="text-gray-500 text-xs">No data</div>
+                            <EmptyState compact title="No data" />
                           )}
                         </div>
                       </div>
@@ -559,5 +556,5 @@ export function DataExplorerPage({ onClose }: DataExplorerPageProps) {
   }
 
   // Otherwise render inline
-  return <div className="h-full flex items-center justify-center bg-gray-950">{content}</div>;
+  return <div className="h-full py-3">{content}</div>;
 }

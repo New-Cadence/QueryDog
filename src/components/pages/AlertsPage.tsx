@@ -1,36 +1,36 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { AgGridReact } from 'ag-grid-react';
-import { AllCommunityModule, ModuleRegistry, themeAlpine } from 'ag-grid-community';
+import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef, ICellRendererParams, SelectionChangedEvent } from 'ag-grid-community';
-import { Play, RotateCcw, Loader2, Eye, X, Copy, Check, Search, PlayCircle, ExternalLink, BarChart2, GitCompare, Pencil } from 'lucide-react';
+import { Play, RotateCcw, Eye, X, Copy, Check, ExternalLink, BarChart2, GitCompare, Bell, VolumeX } from 'lucide-react';
 import { QueryCompareModal } from '../QueryCompareModal';
 import { QueryResultsModal } from '../QueryResultsModal';
 import type { QueryLogEntry } from '../../types/queryLog';
-import { parseServerTime } from '../../utils/formatters';
+import { formatBytes, formatDateTime, formatDuration } from '../../utils/formatters';
+import { useGridTheme } from '../../hooks/useTheme';
+import { useClientFilters, type ClientFilterField } from '../../hooks/useClientFilters';
+import { ClientFilterPanel } from '../ClientFilterPanel';
+import { EmptyState, PageToolbar, ToolbarSearch, LoadingState, Pill } from '../ui';
+import { ClientFolderNotice } from '../ClientFolderNotice';
+import {
+  api, channelMeta, silenceFor, type Act, type AlertRule, type Channel, type Silence, type Severity, type EvalState,
+} from '../alerting/model';
+import { Sparkline } from '../alerting/widgets';
+import { CHECK_ROW_SELECTION, CHECK_SELECTION_COLUMN, LAST_RUN_HIDDEN_COLUMNS, checkLeadColumns, lastRunColumns, runTargets, type CheckRowHandlers } from '../checks/model';
+import { RunChecksButton, SeverityPill, ResultMark } from '../checks/cells';
+import { GRID_OVERLAYS } from '../gridOverlays';
+import { GridColumnSelector } from '../GridColumnSelector';
+import { InTabsRight } from '../ui';
+import { useHiddenColumns } from '../../hooks/useHiddenColumns';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-const darkTheme = themeAlpine.withParams({
-  backgroundColor: '#111827',
-  headerBackgroundColor: '#1f2937',
-  oddRowBackgroundColor: '#111827',
-  rowHoverColor: '#1f2937',
-  borderColor: '#374151',
-  foregroundColor: '#9ca3af',
-  headerTextColor: '#f3f4f6',
-  fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-  fontSize: 9,
-  headerFontSize: 11,
-  headerFontWeight: 600,
-  cellTextColor: '#9ca3af',
-  rowHeight: 32,
-  headerHeight: 30,
-});
-
 interface Alert {
   filename: string;
+  title?: string;
   query: string;
   description?: string;
+  category?: string;
   lastRunTime: string | null;
   lastDuration: number | null;
   lastRowCount: number | null;
@@ -62,34 +62,34 @@ interface RunLogEntry {
   queryLog: QueryLogInfo | null;
 }
 
-function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return '-';
-  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
-  return ms.toFixed(0) + 'ms';
+// Each .sql check carries its alerting rule (severity, condition,
+// channels, ...), keyed by filename. Cells read rules from the grid context.
+interface ChecksContext {
+  rules: Map<string, AlertRule>;
+  channels: Channel[];
+  silences: Silence[];
+  act: Act;
+  onSilence: (check: string) => void;
 }
 
-function formatDateTime(isoString: string | null): string {
-  if (!isoString) return '-';
-  const date = parseServerTime(isoString);
-  return date.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
+const ruleOf = (p: { data?: Alert; context: ChecksContext }) => (p.data ? p.context.rules.get(p.data.filename) : undefined);
+
+interface AlertsPageProps {
+  rules: AlertRule[];
+  channels: Channel[];
+  silences: Silence[];
+  act: Act;
+  onChanged: () => void;
+  onSilence: (check: string) => void;
 }
 
-function formatBytes(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined) return '-';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-}
+const alertSearchText = (a: Alert) => `${a.title ?? ''}\n${a.filename}\n${a.query}\n${a.description ?? ''}`;
 
-export function AlertsPage() {
+// Checks and their rules are loaded from the client folder in the repo, so
+// this grid is read-only: run, inspect, compare and silence only.
+export function AlertsPage({ rules, channels, silences, act, onChanged, onSilence }: AlertsPageProps) {
+  const gridTheme = useGridTheme();
+  const rulesByCheck = useMemo(() => new Map(rules.map(r => [r.check, r])), [rules]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
   const [runningAlert, setRunningAlert] = useState<string | null>(null);
@@ -97,8 +97,6 @@ export function AlertsPage() {
   const [error, setError] = useState<string | null>(null);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [queryCopied, setQueryCopied] = useState(false);
-  const [localSearch, setLocalSearch] = useState('');
-  const [search, setSearch] = useState('');
   const [loadMessage, setLoadMessage] = useState<string | null>(null);
   const [runningAll, setRunningAll] = useState(false);
   const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
@@ -107,9 +105,6 @@ export function AlertsPage() {
   const [selectedAlerts, setSelectedAlerts] = useState<Alert[]>([]);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
   const [compareEntries, setCompareEntries] = useState<QueryLogEntry[]>([]);
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [editedQuery, setEditedQuery] = useState('');
-  const [editedDescription, setEditedDescription] = useState('');
   const [resultsAlert, setResultsAlert] = useState<Alert | null>(null);
 
   useEffect(() => {
@@ -137,19 +132,14 @@ export function AlertsPage() {
       .finally(() => setRunLogLoading(false));
   }, [selectedAlert]);
 
-  const fetchAlerts = useCallback(async (showLoadMessage = false) => {
+  const fetchAlerts = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/alerts');
       if (!res.ok) throw new Error('Failed to fetch alerts');
       const data = await res.json();
-      const list = data.alerts || [];
-      const alertsPath = data.path || './alerts';
-      setAlerts(list);
+      setAlerts(data.alerts || []);
       setError(null);
-      if (showLoadMessage) {
-        setLoadMessage(`${list.length} ${list.length === 1 ? 'alert' : 'alerts'} loaded from ${alertsPath}`);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
       setLoadMessage(null);
@@ -159,23 +149,41 @@ export function AlertsPage() {
   }, []);
 
   useEffect(() => {
-    fetchAlerts(true);
+    fetchAlerts();
   }, [fetchAlerts]);
 
+  // Reload the file list when checks are created or deleted
+  const checkSet = rules.map(r => r.check).join();
+  const reloadQuietly = useCallback(async () => {
+    try {
+      const res = await fetch('/api/alerts');
+      if (res.ok) setAlerts((await res.json()).alerts || []);
+    } catch {
+      // keep the current list; the next change will retry
+    }
+  }, []);
+  const firstCheckSet = useRef(checkSet);
   useEffect(() => {
-    const timer = setTimeout(() => setSearch(localSearch), 300);
-    return () => clearTimeout(timer);
-  }, [localSearch]);
+    if (checkSet !== firstCheckSet.current) void reloadQuietly();
+  }, [checkSet, reloadQuietly]);
 
-  const filteredAlerts = useMemo(() => {
-    if (!search) return alerts;
-    const searchLower = search.toLowerCase();
-    return alerts.filter(a =>
-      a.filename.toLowerCase().includes(searchLower) ||
-      a.query.toLowerCase().includes(searchLower) ||
-      (a.description ?? '').toLowerCase().includes(searchLower)
-    );
-  }, [alerts, search]);
+  const filterFields = useMemo((): ClientFilterField<Alert>[] => {
+    const rule = (a: Alert) => rulesByCheck.get(a.filename);
+    return [
+      { field: 'state', label: 'Last result', getValue: a => rule(a)?.lastResult?.state || 'not evaluated' },
+      { field: 'severity', label: 'Severity', getValue: a => rule(a)?.severity },
+      { field: 'category', label: 'Category', getValue: a => rule(a)?.category || a.category || 'Uncategorised' },
+      { field: 'channels', label: 'Channel', getValue: a => {
+        const ids = rule(a)?.channels || [];
+        return ids.length ? ids.map(id => channels.find(c => c.id === id)?.name || id) : ['none'];
+      } },
+      { field: 'custom', label: 'Source', getValue: a => (rule(a)?.custom ? 'custom' : 'bundled') },
+      { field: 'documented', label: 'Description', getValue: a => (a.description ? 'Has description' : 'No description') },
+    ];
+  }, [rulesByCheck, channels]);
+
+  const alertFilters = useClientFilters(alerts, filterFields, alertSearchText);
+  const filteredAlerts = alertFilters.filtered;
 
   const runAlert = useCallback(async (alert: Alert, skipRefresh = false) => {
     setRunningAlert(alert.filename);
@@ -184,24 +192,20 @@ export function AlertsPage() {
       setError(null);
     }
     try {
-      const res = await fetch('/api/alerts/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: alert.filename, query: alert.query }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to run alert');
-
-      if (data.stats) {
-        setAlerts(prev => prev.map(a =>
-          a.filename === alert.filename ? { ...a, ...data.stats } : a
-        ));
-      }
+      // Evaluating the rule records the run (timings, run log) and opens or
+      // resolves incidents, so a manual run behaves exactly like a scheduled one.
+      const data = await api<{ lastResult: { rowCount: number | null; duration: number } | null; lastError: string | null }>(
+        'POST', `/rules/${encodeURIComponent(alert.filename)}/evaluate`);
+      if (data.lastError) throw new Error(data.lastError);
+      const rowCount = data.lastResult?.rowCount ?? 0;
+      const duration = data.lastResult?.duration ?? 0;
 
       if (!skipRefresh) {
-        setLastResult({ filename: alert.filename, rowCount: data.rowCount, duration: data.duration });
+        setLastResult({ filename: alert.filename, rowCount, duration });
+        await reloadQuietly();
+        onChanged();
       }
-      return { success: true, duration: data.duration, rowCount: data.rowCount };
+      return { success: true, duration, rowCount };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       if (!skipRefresh) setError(errorMsg);
@@ -209,7 +213,7 @@ export function AlertsPage() {
     } finally {
       setRunningAlert(null);
     }
-  }, []);
+  }, [reloadQuietly, onChanged]);
 
   const resetStats = useCallback(async () => {
     try {
@@ -224,18 +228,19 @@ export function AlertsPage() {
   }, [fetchAlerts]);
 
   const runAllAlerts = useCallback(async () => {
-    if (runningAll || filteredAlerts.length === 0) return;
+    const targets = runTargets(selectedAlerts, filteredAlerts, a => !!silenceFor(silences, a.filename));
+    if (runningAll || targets.length === 0) return;
     setRunningAll(true);
     setError(null);
     setLastResult(null);
     setLoadMessage(null);
-    const total = filteredAlerts.length;
+    const total = targets.length;
     let firingCount = 0;
     let failCount = 0;
 
-    for (let i = 0; i < filteredAlerts.length; i++) {
+    for (let i = 0; i < targets.length; i++) {
       setRunAllProgress({ current: i + 1, total });
-      const result = await runAlert(filteredAlerts[i], true);
+      const result = await runAlert(targets[i], true);
       if (!result.success) {
         failCount++;
       } else if ((result.rowCount ?? 0) > 0) {
@@ -245,93 +250,10 @@ export function AlertsPage() {
 
     setRunAllProgress(null);
     setRunningAll(false);
+    await reloadQuietly();
+    onChanged();
     setLoadMessage(`Completed: ${firingCount} firing, ${failCount} errors out of ${total} alerts`);
-  }, [runningAll, filteredAlerts, runAlert]);
-
-  const PlayButtonRenderer = useCallback((params: ICellRendererParams<Alert>) => {
-    const isRunning = runningAlert === params.data?.filename;
-    return (
-      <button
-        onClick={() => params.data && runAlert(params.data)}
-        disabled={isRunning || runningAlert !== null}
-        className="p-1.5 hover:bg-blue-600 bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        title="Run alert"
-      >
-        {isRunning ? (
-          <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
-        ) : (
-          <Play className="w-3.5 h-3.5 text-white" />
-        )}
-      </button>
-    );
-  }, [runningAlert, runAlert]);
-
-  const ActionCellRenderer = useCallback((params: ICellRendererParams<Alert>) => {
-    const handleView = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (params.data) {
-        setSelectedAlert(params.data);
-        setIsEditMode(false);
-      }
-    };
-
-    const handleEdit = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (params.data) {
-        setSelectedAlert(params.data);
-        setEditedQuery(params.data.query);
-        setEditedDescription(params.data.description ?? '');
-        setIsEditMode(true);
-      }
-    };
-
-    return (
-      <div className="flex items-center gap-0.5">
-        <button onClick={handleView} className="p-1 hover:bg-gray-600 rounded" title="View alert (read-only)">
-          <Eye className="w-3.5 h-3.5 text-gray-400 hover:text-white" />
-        </button>
-        <button onClick={handleEdit} className="p-1 hover:bg-gray-600 rounded" title="Edit alert">
-          <Pencil className="w-3.5 h-3.5 text-gray-400 hover:text-white" />
-        </button>
-      </div>
-    );
-  }, []);
-
-  const ViewResultsRenderer = useCallback((params: ICellRendererParams<Alert>) => {
-    return (
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          if (params.data) setResultsAlert(params.data);
-        }}
-        className="p-1 hover:bg-blue-700/50 rounded text-blue-400 hover:text-blue-300"
-        title="Run and view results"
-      >
-        <Eye className="w-4 h-4" />
-      </button>
-    );
-  }, []);
-
-  const StatusRenderer = useCallback((params: ICellRendererParams<Alert>) => {
-    const a = params.data;
-    if (!a || a.runCount === 0) return null;
-    const rows = a.lastRowCount ?? 0;
-    if (rows > 0) {
-      return (
-        <span
-          className="inline-flex items-center justify-center w-5 h-5 bg-orange-500 text-white text-[10px] font-bold rounded-full cursor-help"
-          title={`Firing (${rows} row${rows === 1 ? '' : 's'} on last run)`}
-        >
-          🔔
-        </span>
-      );
-    }
-    return (
-      <span className="text-green-400 text-lg font-bold" title="OK – no rows on last run">
-        ✓
-      </span>
-    );
-  }, []);
+  }, [runningAll, selectedAlerts, filteredAlerts, silences, runAlert, reloadQuietly, onChanged]);
 
   const handleCopyQuery = useCallback(async () => {
     if (!selectedAlert) return;
@@ -344,9 +266,6 @@ export function AlertsPage() {
     setSelectedAlert(null);
     setQueryCopied(false);
     setRunLog([]);
-    setIsEditMode(false);
-    setEditedQuery('');
-    setEditedDescription('');
   }, []);
 
   const handleAnalyseQuery = useCallback(() => {
@@ -358,66 +277,9 @@ export function AlertsPage() {
     }
   }, [selectedAlert, handleCloseModal]);
 
-  const handleSaveQuery = useCallback(async () => {
-    if (!selectedAlert) return;
-    try {
-      const res = await fetch('/api/alerts/update', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: selectedAlert.filename,
-          query: editedQuery,
-          description: editedDescription,
-        }),
-      });
-      if (!res.ok) throw new Error('Failed to save alert');
-      setAlerts(prev => prev.map(a =>
-        a.filename === selectedAlert.filename
-          ? { ...a, query: editedQuery, description: editedDescription }
-          : a
-      ));
-      setSelectedAlert({ ...selectedAlert, query: editedQuery, description: editedDescription });
-      setIsEditMode(false);
-      setLoadMessage(`Alert "${selectedAlert.filename}" updated successfully`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save alert');
-    }
-  }, [selectedAlert, editedQuery, editedDescription]);
-
-  const handleCancelEdit = useCallback(() => {
-    setIsEditMode(false);
-    setEditedQuery('');
-    setEditedDescription('');
-  }, []);
-
-  const handleCloneAlert = useCallback(async () => {
-    if (selectedAlerts.length !== 1) return;
-    const alertToClone = selectedAlerts[0];
-    const baseName = alertToClone.filename.replace(/\.sql$/, '');
-    const newFilename = `${baseName}_copy.sql`;
-
-    try {
-      const res = await fetch('/api/alerts/clone', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sourceFilename: alertToClone.filename,
-          newFilename,
-          query: alertToClone.query,
-        }),
-      });
-      if (!res.ok) throw new Error('Failed to clone alert');
-      const data = await res.json();
-      setLoadMessage(`Alert cloned as "${data.filename}"`);
-      await fetchAlerts();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to clone alert');
-    }
-  }, [selectedAlerts, fetchAlerts]);
-
   const onSelectionChanged = useCallback((event: SelectionChangedEvent<Alert>) => {
     const selectedRows = event.api.getSelectedRows();
-    setSelectedAlerts(selectedRows.slice(0, 10));
+    setSelectedAlerts(selectedRows);
   }, []);
 
   const handleCompareAlerts = useCallback(async () => {
@@ -425,7 +287,7 @@ export function AlertsPage() {
 
     try {
       setLoading(true);
-      const runLogPromises = selectedAlerts.map(a =>
+      const runLogPromises = selectedAlerts.slice(0, 10).map(a =>
         fetch(`/api/alerts/run-log/${encodeURIComponent(a.filename)}`)
           .then(res => res.json())
           .then(data => ({ alert: a, runLog: data.runLog || [] }))
@@ -472,22 +334,119 @@ export function AlertsPage() {
     return valueA - valueB;
   }, []);
 
+  const checkHandlers = useMemo((): CheckRowHandlers<Alert> => ({
+    onView: a => setSelectedAlert(a),
+    onRun: a => void runAlert(a),
+    isRunning: a => runningAlert === a.filename,
+    runBlocked: runningAlert !== null || runningAll,
+    silenceOf: a => silenceFor(silences, a.filename) ?? null,
+    onSilence: a => onSilence(a.filename),
+    onUnsilence: sil => void act(() => api('DELETE', `/silences/${encodeURIComponent(sil.id)}`), `Unsilenced ${sil.check || 'all checks'}`),
+  }), [runAlert, runningAlert, runningAll, silences, onSilence, act]);
+
   const columnDefs = useMemo((): ColDef<Alert>[] => {
     return [
+      ...checkLeadColumns(checkHandlers),
       {
-        headerName: '',
-        field: 'filename',
-        width: 70,
+        headerName: 'Title',
+        colId: 'title',
+        width: 300,
+        sortable: true,
+        valueGetter: (p) => p.data?.title || p.data?.filename.replace(/\.sql$/, '') || '',
+        tooltipValueGetter: (params) => params.data?.description || '',
+        cellRenderer: (p: ICellRendererParams<Alert, string, ChecksContext>) => {
+          const r = ruleOf(p);
+          return (
+            <span className="flex items-center gap-1.5 text-gray-100">
+              <span className="truncate">{p.value}</span>
+              {r?.custom && <Pill tone="blue">custom</Pill>}
+              {p.data && silenceFor(p.context.silences, p.data.filename) && <span title="Silenced"><VolumeX className="w-3 h-3 text-yellow-400 shrink-0" /></span>}
+            </span>
+          );
+        },
+      },
+      // Default sort lives here: a grid initialState would drop the column pinning
+      { headerName: 'File', field: 'filename', width: 240, sortable: true, sort: 'asc', cellStyle: { color: '#93c5fd' } },
+      { headerName: 'Category', colId: 'category', width: 130, valueGetter: (p) => ruleOf(p as never)?.category || p.data?.category || '' },
+      {
+        headerName: 'Severity',
+        colId: 'severity',
+        width: 95,
+        valueGetter: (p) => ruleOf(p as never)?.severity ?? '',
+        cellRenderer: (p: ICellRendererParams) => <SeverityPill severity={p.value as Severity} />,
+      },
+      ...lastRunColumns<Alert>(a => a.lastRunTime, { cellStyle: { color: '#fca5a5' } }),
+      {
+        headerName: 'History',
+        colId: 'history',
+        width: 140,
         sortable: false,
-        cellRenderer: ActionCellRenderer,
-        cellStyle: { display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        cellRenderer: (p: ICellRendererParams<Alert, unknown, ChecksContext>) => {
+          const r = ruleOf(p);
+          return r && <div className="h-full flex items-center"><Sparkline history={r.history} /></div>;
+        },
       },
       {
-        headerName: 'Filename',
-        field: 'filename',
-        width: 280,
-        sortable: true,
+        headerName: 'Condition',
+        colId: 'condition',
+        width: 100,
+        valueGetter: (p) => {
+          const r = ruleOf(p as never);
+          return r ? `rows ${r.operator} ${r.threshold}` : '';
+        },
         cellStyle: { color: '#93c5fd' },
+      },
+      {
+        headerName: 'For',
+        colId: 'forMinutes',
+        width: 60,
+        valueGetter: (p) => ruleOf(p as never)?.forMinutes ?? null,
+        valueFormatter: (p) => (p.value == null ? '' : p.value ? `${p.value}m` : 'now'),
+      },
+      {
+        headerName: 'Notify',
+        colId: 'channels',
+        width: 100,
+        sortable: false,
+        cellRenderer: (p: ICellRendererParams<Alert, unknown, ChecksContext>) => {
+          const ids = ruleOf(p)?.channels || [];
+          return (
+            <div className="flex items-center gap-1 h-full">
+              {ids.map(id => {
+                const c = p.context.channels.find(ch => ch.id === id);
+                if (!c) return null;
+                const Icon = channelMeta[c.type].icon;
+                return <span key={id} title={c.name} className={c.enabled ? 'text-gray-400' : 'text-gray-600'}><Icon className="w-3.5 h-3.5" /></span>;
+              })}
+              {!ids.length && <span className="text-gray-600 text-[11px]">none</span>}
+            </div>
+          );
+        },
+      },
+      {
+        headerName: 'Last Time',
+        field: 'lastDuration',
+        width: 90,
+        sortable: true,
+        valueFormatter: (params) => formatDuration(params.value),
+        comparator: timeComparator,
+        cellStyle: { textAlign: 'right', color: '#86efac' },
+      },
+      {
+        headerName: 'Avg Time',
+        field: 'avgRunTime',
+        width: 90,
+        sortable: true,
+        valueFormatter: (params) => formatDuration(params.value),
+        comparator: timeComparator,
+        cellStyle: { textAlign: 'right', color: '#86efac' },
+      },
+      {
+        headerName: 'Runs',
+        field: 'runCount',
+        width: 60,
+        sortable: true,
+        cellStyle: { textAlign: 'right', color: '#86efac' },
       },
       {
         headerName: 'Description',
@@ -505,111 +464,49 @@ export function AlertsPage() {
         },
       },
       {
-        headerName: 'Query',
-        field: 'query',
-        width: 380,
-        sortable: false,
-        cellStyle: { color: '#93c5fd' },
-        tooltipValueGetter: (params) => {
-          const q = params.value as string;
-          if (!q) return '';
-          const formatted = q
-            .replace(/\s+/g, ' ')
-            .replace(/(SELECT|FROM|WHERE|AND|OR|JOIN|LEFT|RIGHT|INNER|OUTER|GROUP BY|ORDER BY|LIMIT|HAVING|UNION|INSERT|UPDATE|DELETE|SET|INTO|VALUES)/gi, '\n$1')
-            .trim();
-          const maxLen = 1000;
-          return formatted.length > maxLen ? formatted.substring(0, maxLen) + '\n...(truncated)' : formatted;
-        },
-        valueFormatter: (params) => {
-          const q = params.value as string;
-          return q?.length > 110 ? q.substring(0, 110) + '...' : q;
-        },
+        headerName: 'Last Error',
+        colId: 'lastError',
+        width: 200,
+        valueGetter: (p) => ruleOf(p as never)?.lastError ?? '',
+        tooltipValueGetter: (p) => (p.value as string) || '',
+        cellStyle: { color: '#f87171' },
       },
-      {
-        headerName: '',
-        field: 'filename',
-        width: 50,
-        sortable: false,
-        cellRenderer: PlayButtonRenderer,
-        cellStyle: { display: 'flex', alignItems: 'center', justifyContent: 'center' },
-      },
-      {
-        headerName: 'Last Run',
-        field: 'lastRunTime',
-        width: 140,
-        sortable: true,
-        valueFormatter: (params) => formatDateTime(params.value),
-        cellStyle: { color: '#fca5a5' },
-      },
-      {
-        headerName: 'Last Time',
-        field: 'lastDuration',
-        width: 90,
-        sortable: true,
-        valueFormatter: (params) => formatDuration(params.value),
-        comparator: timeComparator,
-        cellStyle: { textAlign: 'right', color: '#86efac' },
-      },
-      {
-        headerName: 'Last Rows',
-        field: 'lastRowCount',
-        width: 90,
-        sortable: true,
-        valueFormatter: (params) => params.value != null ? params.value.toLocaleString() : '-',
-        cellStyle: { textAlign: 'right', color: '#86efac' },
-      },
-      {
-        headerName: 'Avg Time',
-        field: 'avgRunTime',
-        width: 90,
-        sortable: true,
-        valueFormatter: (params) => formatDuration(params.value),
-        comparator: timeComparator,
-        cellStyle: { textAlign: 'right', color: '#86efac' },
-      },
-      {
-        headerName: 'Fastest',
-        field: 'fastestRunTime',
-        width: 80,
-        sortable: true,
-        valueFormatter: (params) => formatDuration(params.value),
-        comparator: timeComparator,
-        cellStyle: { textAlign: 'right', color: '#86efac' },
-      },
-      {
-        headerName: 'Slowest',
-        field: 'slowestRunTime',
-        width: 80,
-        sortable: true,
-        valueFormatter: (params) => formatDuration(params.value),
-        comparator: timeComparator,
-        cellStyle: { textAlign: 'right', color: '#86efac' },
-      },
-      {
-        headerName: 'Runs',
-        field: 'runCount',
-        width: 60,
-        sortable: true,
-        cellStyle: { textAlign: 'right', color: '#86efac' },
-      },
+      // Always visible at the right edge, like the row actions on the left
       {
         headerName: 'Status',
-        field: 'filename',
-        width: 60,
-        sortable: false,
-        cellRenderer: StatusRenderer,
-        cellStyle: { display: 'flex', alignItems: 'center', justifyContent: 'center' },
-      },
-      {
-        headerName: '',
-        field: 'filename',
-        width: 50,
-        sortable: false,
-        cellRenderer: ViewResultsRenderer,
-        cellStyle: { display: 'flex', alignItems: 'center', justifyContent: 'center' },
+        colId: 'state',
+        width: 110,
+        pinned: 'right',
+        lockPinned: true,
+        valueGetter: (p) => ruleOf(p as never)?.lastResult?.state ?? '',
+        cellRenderer: (p: ICellRendererParams<Alert, unknown, ChecksContext>) => {
+          const res = ruleOf(p)?.lastResult;
+          if (!res) return <ResultMark result="none" title="Not evaluated yet" />;
+          return (
+            <span className="flex items-center gap-1.5">
+              <ResultMark result={({ ok: 'pass', firing: 'fail', pending: 'pending', error: 'error' } as const)[res.state as EvalState]} title={res.state} />
+              {res.rowCount !== null && <span className="text-gray-400">{res.rowCount} rows</span>}
+            </span>
+          );
+        },
       },
     ];
-  }, [PlayButtonRenderer, ActionCellRenderer, StatusRenderer, ViewResultsRenderer, timeComparator]);
+  }, [checkHandlers, timeComparator]);
+
+  const gridContext: ChecksContext = { rules: rulesByCheck, channels, silences, act, onSilence };
+  // Columns the viewer chose to hide (Configure columns)
+  const columnPrefs = useHiddenColumns('monitoring-checks', LAST_RUN_HIDDEN_COLUMNS);
+  const shownColumnDefs = useMemo(() => columnPrefs.applyHidden(columnDefs), [columnPrefs, columnDefs]);
+
+  // Rule cells read from the grid context, so force a redraw when rules, silences or channels change
+  const gridRef = useRef<AgGridReact<Alert>>(null);
+  useEffect(() => { gridRef.current?.api?.refreshCells({ force: true }); }, [rules, silences, channels]);
+
+  const NoAlertsOverlay = useCallback(() => (
+    alerts.length === 0
+      ? <EmptyState compact icon={Bell} title="No monitoring checks" />
+      : <EmptyState compact icon={Bell} title="No checks match the filters" />
+  ), [alerts.length]);
 
   const defaultColDef = useMemo<ColDef>(() => ({
     resizable: true,
@@ -621,72 +518,38 @@ export function AlertsPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Filter bar */}
-      <div className="bg-gray-900/50 border-b border-gray-700 px-3 sm:px-4 h-9 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          {/* Search bar */}
-          <div className="relative flex items-center">
-            <Search className="absolute left-2 w-3 h-3 text-gray-400" />
-            <input
-              type="text"
-              value={localSearch}
-              onChange={(e) => setLocalSearch(e.target.value)}
-              placeholder="Search filename or query..."
-              className="bg-gray-800 border border-gray-600 rounded pl-6 pr-6 py-0.5 text-white text-xs w-64"
-            />
-            {localSearch && (
-              <button
-                onClick={() => { setLocalSearch(''); setSearch(''); }}
-                className="absolute right-2 text-gray-400 hover:text-white"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
+      <PageToolbar
+        left={<>
+          <ClientFilterPanel
+            rows={alerts}
+            fields={filterFields}
+            filters={alertFilters.filters}
+            onChange={alertFilters.setFilter}
+            onClearAll={alertFilters.clearAll}
+          />
+          <ToolbarSearch value={alertFilters.search} onChange={alertFilters.setSearch} placeholder="Search filename, query or description..." />
+        </>}
+        right={<>
           <span className="text-xs text-gray-400">
-            {filteredAlerts.length} {filteredAlerts.length === 1 ? 'alert' : 'alerts'}
-            {search && ` (filtered from ${alerts.length})`}
+            <span className="text-white font-medium">{filteredAlerts.length}</span>
+            {filteredAlerts.length !== alerts.length && ` of ${alerts.length}`} {alerts.length === 1 ? 'check' : 'checks'}
           </span>
+          {alertFilters.activeCount > 0 && (
+            <span className="text-xs text-blue-400">
+              {alertFilters.activeCount} filter{alertFilters.activeCount > 1 ? 's' : ''} active
+            </span>
+          )}
           {selectedAlerts.length >= 2 ? (
             <button
               onClick={handleCompareAlerts}
               className="flex items-center gap-1.5 px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-white text-xs"
             >
               <GitCompare className="w-3.5 h-3.5" />
-              Compare ({selectedAlerts.length})
+              Compare ({Math.min(selectedAlerts.length, 10)})
             </button>
-          ) : selectedAlerts.length === 1 ? (
-            <>
-              <button
-                onClick={handleCloneAlert}
-                className="flex items-center gap-1.5 px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-white text-xs"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                Clone
-              </button>
-              <span className="text-xs text-gray-400">
-                or select 1 more to compare
-              </span>
-            </>
           ) : null}
-          <button
-            onClick={runAllAlerts}
-            disabled={loading || runningAll || runningAlert !== null}
-            className="flex items-center gap-1.5 px-2 py-1 bg-blue-700 hover:bg-blue-600 rounded text-white text-xs disabled:opacity-50"
-          >
-            {runningAll ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {runAllProgress ? `${runAllProgress.current}/${runAllProgress.total}` : 'Running...'}
-              </>
-            ) : (
-              <>
-                <PlayCircle className="w-3.5 h-3.5" />
-                Run All
-              </>
-            )}
-          </button>
+          <RunChecksButton selected={selectedAlerts.length} running={runningAll} progress={runAllProgress}
+            disabled={loading || runningAlert !== null} onClick={runAllAlerts} />
           <button
             onClick={resetStats}
             disabled={loading || runningAll || runningAlert !== null}
@@ -695,15 +558,17 @@ export function AlertsPage() {
             <RotateCcw className="w-3.5 h-3.5" />
             Reset
           </button>
-        </div>
-      </div>
+        </>}
+      />
+
+      <ClientFolderNotice kind="monitoring" onlyProblems className="mx-1.5 mt-3" />
+      <ClientFolderNotice kind="alerts" onlyProblems className="mx-1.5 mt-1.5" />
+
+      <InTabsRight><GridColumnSelector columns={columnDefs} hidden={columnPrefs.hidden} onToggle={columnPrefs.toggle} /></InTabsRight>
 
       {/* Status Bar */}
-      <div className={`mx-4 mt-3 px-3 py-2 rounded text-xs ${
-        error ? 'bg-red-900/50 text-red-300' :
-        lastResult ? 'bg-green-900/50 text-green-300 h-8' :
-        loadMessage ? 'bg-green-900/50 text-green-300 h-8' :
-        'bg-transparent h-8'
+      {(error || lastResult || loadMessage) && <div className={`mx-1.5 mt-1.5 px-3 py-2 rounded text-xs ${
+        error ? 'bg-red-900/50 text-red-300' : 'bg-green-900/50 text-green-300'
       }`}>
         {error ? (
           <div className="break-words whitespace-pre-wrap">Error: {error}</div>
@@ -715,14 +580,16 @@ export function AlertsPage() {
         ) : loadMessage ? (
           <span>{loadMessage}</span>
         ) : null}
-      </div>
+      </div>}
 
       {/* Grid */}
-      <div className="flex-1 mx-4 mb-4 mt-3 bg-gray-900 border border-gray-700 rounded overflow-hidden">
-        <AgGridReact<Alert>
-          theme={darkTheme}
+      <div className="flex-1 mx-1.5 mb-4 mt-3 bg-gray-900 border border-gray-700 rounded overflow-hidden">
+        <AgGridReact<Alert> {...GRID_OVERLAYS}
+          ref={gridRef}
+          context={gridContext}
+          theme={gridTheme}
           rowData={filteredAlerts}
-          columnDefs={columnDefs}
+          columnDefs={shownColumnDefs}
           defaultColDef={defaultColDef}
           loading={loading}
           animateRows={false}
@@ -731,31 +598,13 @@ export function AlertsPage() {
           tooltipShowDelay={300}
           tooltipInteraction={true}
           suppressColumnVirtualisation={true}
+          noRowsOverlayComponent={NoAlertsOverlay}
           getRowId={(params) => params.data.filename}
-          rowSelection="multiple"
-          rowMultiSelectWithClick={true}
+          rowSelection={CHECK_ROW_SELECTION}
+          selectionColumnDef={CHECK_SELECTION_COLUMN}
           onSelectionChanged={onSelectionChanged}
-          initialState={{
-            sort: {
-              sortModel: [{ colId: 'lastRunTime', sort: 'desc' }]
-            }
-          }}
         />
       </div>
-
-      {/* Empty State */}
-      {!loading && filteredAlerts.length === 0 && (
-        <div className="mx-4 mt-4 text-center text-gray-500">
-          {alerts.length === 0 ? (
-            <>
-              <p className="text-sm">No alerts found in ./alerts folder</p>
-              <p className="text-xs mt-1">Add .sql files to the alerts folder to get started</p>
-            </>
-          ) : (
-            <p className="text-sm">No alerts match your search</p>
-          )}
-        </div>
-      )}
 
       {/* Alert Details Modal */}
       {selectedAlert && (
@@ -778,21 +627,12 @@ export function AlertsPage() {
               {/* Description */}
               <div className="mb-4">
                 <h3 className="text-xs font-semibold text-gray-400 mb-1">Description</h3>
-                {isEditMode ? (
-                  <textarea
-                    value={editedDescription}
-                    onChange={(e) => setEditedDescription(e.target.value)}
-                    className="w-full bg-gray-800 p-3 rounded text-xs text-gray-200 font-mono border border-gray-700 focus:outline-none focus:border-blue-500"
-                    rows={6}
-                    placeholder="What does this alert detect? When should someone care?"
-                    spellCheck={true}
-                  />
-                ) : selectedAlert.description ? (
+                {selectedAlert.description ? (
                   <pre className="bg-gray-800 p-3 rounded text-xs text-gray-200 whitespace-pre-wrap break-words font-mono max-h-64 overflow-y-auto">
                     {selectedAlert.description}
                   </pre>
                 ) : (
-                  <div className="text-xs text-gray-500 italic px-3 py-2">No description. Click Edit to add one.</div>
+                  <EmptyState compact title="No description" />
                 )}
               </div>
 
@@ -800,59 +640,28 @@ export function AlertsPage() {
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2">
                     <h3 className="text-xs font-semibold text-gray-400">Query</h3>
-                    {!isEditMode && (
-                      <button
-                        onClick={handleCopyQuery}
-                        className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
-                        title="Copy query"
-                      >
-                        {queryCopied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
-                        {queryCopied ? 'Copied' : 'Copy'}
-                      </button>
-                    )}
+                    <button
+                      onClick={handleCopyQuery}
+                      className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+                      title="Copy query"
+                    >
+                      {queryCopied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+                      {queryCopied ? 'Copied' : 'Copy'}
+                    </button>
                   </div>
                   <div className="flex items-center gap-2">
-                    {isEditMode ? (
-                      <>
-                        <button
-                          onClick={handleCancelEdit}
-                          className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded text-white"
-                        >
-                          <X className="w-3 h-3" />
-                          Cancel
-                        </button>
-                        <button
-                          onClick={handleSaveQuery}
-                          className="flex items-center gap-1 px-2 py-1 text-xs bg-green-600 hover:bg-green-500 rounded text-white"
-                        >
-                          <Check className="w-3 h-3" />
-                          Save
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={handleAnalyseQuery}
-                        className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded text-white"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        Analyse Query
-                      </button>
-                    )}
+                    <button
+                      onClick={handleAnalyseQuery}
+                      className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded text-white"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Analyse Query
+                    </button>
                   </div>
                 </div>
-                {isEditMode ? (
-                  <textarea
-                    value={editedQuery}
-                    onChange={(e) => setEditedQuery(e.target.value)}
-                    className="w-full bg-gray-800 p-3 rounded text-xs text-blue-400 font-mono border border-blue-500 focus:outline-none focus:border-blue-400"
-                    rows={10}
-                    spellCheck={false}
-                  />
-                ) : (
-                  <pre className="bg-gray-800 p-3 rounded text-xs text-blue-400 max-h-64 overflow-y-auto whitespace-pre-wrap break-words font-mono">
-                    {selectedAlert.query}
-                  </pre>
-                )}
+                <pre className="bg-gray-800 p-3 rounded text-xs text-blue-400 max-h-64 overflow-y-auto whitespace-pre-wrap break-words font-mono">
+                  {selectedAlert.query}
+                </pre>
               </div>
 
               {/* Run Statistics */}
@@ -900,9 +709,9 @@ export function AlertsPage() {
               <div className="mb-4">
                 <h3 className="text-xs font-semibold text-gray-400 mb-2">Run Log</h3>
                 {runLogLoading ? (
-                  <div className="text-xs text-gray-500">Loading run log...</div>
+                  <LoadingState label="Loading run log…" compact />
                 ) : runLog.length === 0 ? (
-                  <div className="text-xs text-gray-500">No runs recorded yet. Run the alert to see execution history.</div>
+                  <EmptyState compact title="No runs recorded" />
                 ) : (
                   <div className="bg-gray-800 rounded overflow-hidden">
                     <table className="w-full text-xs">
@@ -982,6 +791,16 @@ export function AlertsPage() {
                     Analyse Results ({runLog.filter(e => e.queryId).length})
                   </button>
                 )}
+                <button
+                  onClick={() => {
+                    setResultsAlert(selectedAlert);
+                    handleCloseModal();
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-600 hover:bg-gray-500 rounded text-white text-xs"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  Run and view results
+                </button>
                 <button
                   onClick={() => {
                     runAlert(selectedAlert);

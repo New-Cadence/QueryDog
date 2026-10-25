@@ -39,3 +39,9 @@ Thumbs.db
 
 # Testing
 coverage
+
+# Convoy runtime state (alerting, notebooks)
+data/
+
+# Server bundle of the recommendation providers (npm run build:server)
+server/generated/

@@ -5,7 +5,8 @@ import { format } from 'date-fns';
 import { Activity, Clock, HardDrive, Rows3, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react';
 import { useCallback, useMemo } from 'react';
 import { useIsLightMode } from '../hooks/useTheme';
-import { parseServerTime } from '../utils/formatters';
+import { formatDuration, parseServerTime } from '../utils/formatters';
+import { LoadingState } from './ui';
 
 function useChartColors() {
   const isLight = useIsLightMode();
@@ -26,7 +27,6 @@ const AGGREGATION_LABELS: Record<ChartAggregation, string> = {
 };
 
 function getChartConfig(metric: ChartMetric, aggregation: ChartAggregation, isScatter = false) {
-  const formatDuration = (v: number) => v >= 1000 ? (v / 1000).toFixed(2) + 's' : v.toFixed(0) + 'ms';
   const formatMemory = (v: number) => {
     if (v >= 1073741824) return (v / 1073741824).toFixed(1) + ' GB';
     if (v >= 1048576) return (v / 1048576).toFixed(1) + ' MB';
@@ -93,14 +93,16 @@ export function TimelineChart() {
   const { timeSeries, stackedTimeSeries, entries, bucketSize, loading, chartMetric, chartType, chartAggregation, setChartMetric, setTimeRange, setSearch } = useQueryStore();
   const cc = useChartColors();
 
-  // For Count metric, allow line and stacked but not scatter
-  // For non-Count metrics, don't allow stacked charts (they only make sense for count by query_kind)
+  // Stacked types split every metric by query kind; scatter needs a per-query metric
   let effectiveChartType = chartType;
   if (chartMetric === 'count' && chartType === 'scatter') {
     effectiveChartType = 'bar';
-  } else if (chartMetric !== 'count' && (chartType === 'stacked-bar' || chartType === 'stacked-line')) {
-    effectiveChartType = 'bar';
   }
+  // Counts and sums add up across kinds; averages, minimums and maximums are shown side by side
+  const kindStack = chartMetric === 'count' || chartAggregation === 'sum' ? '1' : undefined;
+  // Side-by-side bars split each bucket between the series, so only draw the
+  // kinds that have data; one kind then gets the full width like the stacked view
+  const kindShown = (kind: string) => !!kindStack || stackedTimeSeries.some(row => Number((row as unknown as Record<string, unknown>)[kind]) > 0);
 
   const config = useMemo(() => {
     const cfg = getChartConfig(chartMetric, chartAggregation, effectiveChartType === 'scatter');
@@ -156,7 +158,7 @@ export function TimelineChart() {
       case 'second':
         return format(date, 'HH:mm:ss');
       case 'hour':
-        return format(date, 'MMM d HH:mm');
+        return format(date, 'dd-MMM HH:mm');
       default:
         return format(date, 'HH:mm');
     }
@@ -214,8 +216,8 @@ export function TimelineChart() {
     return (
       <div>
         {renderTabs()}
-        <div className="h-72 bg-gray-900 border border-gray-700 rounded flex items-center justify-center">
-          <span className="text-gray-400 text-xs">Loading...</span>
+        <div className="h-72 bg-gray-900 border border-gray-700 rounded flex">
+          <LoadingState />
         </div>
       </div>
     );
@@ -227,7 +229,7 @@ export function TimelineChart() {
       case 'second':
         return format(date, 'HH:mm:ss');
       case 'hour':
-        return format(date, 'MMM d HH:mm');
+        return format(date, 'dd-MMM HH:mm');
       default:
         return format(date, 'HH:mm');
     }
@@ -322,7 +324,7 @@ export function TimelineChart() {
                 axisLine={{ stroke: cc.grid }}
                 tickLine={{ stroke: cc.grid }}
                 width={50}
-                tickFormatter={(v) => v.toLocaleString()}
+                tickFormatter={(v) => config.formatter(Number(v))}
               />
               <Tooltip
                 contentStyle={{
@@ -333,16 +335,16 @@ export function TimelineChart() {
                 }}
                 cursor={{ fill: 'transparent' }}
                 labelFormatter={formatTime}
-                formatter={(value: number, name: string) => [value.toLocaleString(), name]}
+                formatter={(value: number, name: string) => [config.formatter(value), name]}
                 itemSorter={(item) => {
                   const order = { Select: 0, Insert: 1, Delete: 2, Other: 3 };
                   return order[item.dataKey as keyof typeof order] ?? 4;
                 }}
               />
-              <Bar dataKey="Select" stackId="1" fill="#10b981" fillOpacity={0.8} />
-              <Bar dataKey="Insert" stackId="1" fill="#60a5fa" fillOpacity={0.8} />
-              <Bar dataKey="Delete" stackId="1" fill="#ef4444" fillOpacity={0.8} />
-              <Bar dataKey="Other" stackId="1" fill="#a855f7" fillOpacity={0.8} />
+              {kindShown('Select') && <Bar dataKey="Select" stackId={kindStack} fill="#10b981" fillOpacity={0.8} />}
+              {kindShown('Insert') && <Bar dataKey="Insert" stackId={kindStack} fill="#60a5fa" fillOpacity={0.8} />}
+              {kindShown('Delete') && <Bar dataKey="Delete" stackId={kindStack} fill="#ef4444" fillOpacity={0.8} />}
+              {kindShown('Other') && <Bar dataKey="Other" stackId={kindStack} fill="#a855f7" fillOpacity={0.8} />}
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -407,7 +409,7 @@ export function TimelineChart() {
                 axisLine={{ stroke: cc.grid }}
                 tickLine={{ stroke: cc.grid }}
                 width={50}
-                tickFormatter={(v) => v.toLocaleString()}
+                tickFormatter={(v) => config.formatter(Number(v))}
               />
               <Tooltip
                 contentStyle={{
@@ -417,7 +419,7 @@ export function TimelineChart() {
                   fontSize: '11px',
                 }}
                 labelFormatter={formatTime}
-                formatter={(value: number, name: string) => [value.toLocaleString(), name]}
+                formatter={(value: number, name: string) => [config.formatter(value), name]}
                 itemSorter={(item) => {
                   const order = { Select: 0, Insert: 1, Delete: 2, Other: 3 };
                   return order[item.dataKey as keyof typeof order] ?? 4;
@@ -426,28 +428,28 @@ export function TimelineChart() {
               <Area
                 type="monotone"
                 dataKey="Select"
-                stackId="1"
+                stackId={kindStack}
                 stroke="#10b981"
                 fill="url(#color-select)"
               />
               <Area
                 type="monotone"
                 dataKey="Insert"
-                stackId="1"
+                stackId={kindStack}
                 stroke="#60a5fa"
                 fill="url(#color-insert)"
               />
               <Area
                 type="monotone"
                 dataKey="Delete"
-                stackId="1"
+                stackId={kindStack}
                 stroke="#ef4444"
                 fill="url(#color-delete)"
               />
               <Area
                 type="monotone"
                 dataKey="Other"
-                stackId="1"
+                stackId={kindStack}
                 stroke="#a855f7"
                 fill="url(#color-other)"
               />

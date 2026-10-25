@@ -8,7 +8,8 @@ import { useQueryStore } from '../stores/queryStore';
 import { fetchProfileEvents } from '../services/api';
 import type { QueryLogEntry } from '../types/queryLog';
 import { useGridTheme } from '../hooks/useTheme';
-import { parseServerTime } from '../utils/formatters';
+import { parseServerTime, formatDateTime } from '../utils/formatters';
+import { GRID_OVERLAYS } from './gridOverlays';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -184,22 +185,7 @@ function formatQueryForTooltip(query: string): string {
 }
 
 function formatEventTime(value: string): string {
-  if (!value) return '-';
-  const date = parseServerTime(value);
-  if (Number.isNaN(date.getTime())) return '-';
-
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const pad2 = (num: number) => String(num).padStart(2, '0');
-  const pad3 = (num: number) => String(num).padStart(3, '0');
-
-  const month = months[date.getMonth()];
-  const day = date.getDate();
-  const hours = pad2(date.getHours());
-  const minutes = pad2(date.getMinutes());
-  const seconds = pad2(date.getSeconds());
-  const millis = pad3(date.getMilliseconds());
-
-  return `${month} ${day} ${hours}:${minutes}:${seconds}.${millis}`;
+  return formatDateTime(value, { ms: true });
 }
 
 function toNumberOrUndefined(value: unknown): number | undefined {
@@ -393,7 +379,7 @@ export const ProfileEventsTable = forwardRef<ProfileEventsTableRef, object>(func
       {
         headerName: 'Event Time',
         field: 'event_time',
-        width: 195,
+        width: 215,
         sortable: true,
         pinned: 'left',
         cellStyle: { color: '#fca5a5' },
@@ -483,13 +469,7 @@ export const ProfileEventsTable = forwardRef<ProfileEventsTableRef, object>(func
       parseServerTime(a.event_time).getTime() - parseServerTime(b.event_time).getTime()
     ).map(row => ({
       ...row,
-      time: parseServerTime(row.event_time).toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }),
+      time: formatDateTime(row.event_time, { seconds: false }),
     }));
   }, [combinedData]);
 
@@ -509,7 +489,7 @@ export const ProfileEventsTable = forwardRef<ProfileEventsTableRef, object>(func
       `}</style>
       {/* AG Grid */}
       <div className="flex-1">
-        <AgGridReact
+        <AgGridReact {...GRID_OVERLAYS}
           theme={gridTheme}
           rowData={unpinnedData}
           pinnedTopRowData={pinnedData}

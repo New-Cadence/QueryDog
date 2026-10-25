@@ -2,8 +2,10 @@ import { useState, useMemo, useEffect, useCallback } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import type { ColDef } from 'ag-grid-community';
-import { Settings, HardDrive, Database, BarChart2, Clock, Zap, AlertTriangle, AlertCircle, Search, RefreshCw, LayoutDashboard } from 'lucide-react';
+import { Settings, HardDrive, Database, BarChart2, Clock, Zap, AlertTriangle, AlertCircle, LayoutDashboard } from 'lucide-react';
 import { SystemTable } from '../SystemTable';
+import { ToolbarSlot } from '../ToolbarSlot';
+import { PageTabs, PageToolbar, ToolbarSearch } from '../ui';
 import { DashboardTab } from './DashboardTab';
 import {
   fetchSettings,
@@ -75,6 +77,7 @@ export function InstancePage() {
   const [metricsLoading, setMetricsLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [dashboardFilterBarEl, setDashboardFilterBarEl] = useState<HTMLDivElement | null>(null);
+  const [toolbarEl, setToolbarEl] = useState<HTMLDivElement | null>(null);
 
   const loadMetricsData = useCallback(async () => {
     setMetricsLoading(true);
@@ -160,76 +163,43 @@ export function InstancePage() {
 
   return (
     <div className="h-full flex flex-col">
-      {/* Filter bar - always visible */}
-      <div className="bg-gray-900/50 border-b border-gray-700 px-1.5 h-9 flex items-center justify-between shrink-0">
-        {isDashboardTab ? (
+      {/* Filter bar - the dashboard and system tables fill their own */}
+      {isDashboardTab ? (
+        <div className="bg-gray-900/50 border-b border-gray-700 px-1.5 h-9 flex items-center justify-between shrink-0">
           <div ref={setDashboardFilterBarEl} className="flex items-center justify-between w-full" />
-        ) : (
-          <>
-            <div className="flex items-center gap-3">
-              <div className="relative flex items-center">
-                <Search className="absolute left-2 w-3 h-3 text-gray-400" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder={`Search ${activeTab === 'events' ? 'events' : activeTab === 'settings' ? 'settings' : activeTab === 'errors' ? 'errors' : activeTab === 'disks' ? 'disks' : activeTab === 'storagePolicies' ? 'storage policies' : 'metrics'}...`}
-                  className="bg-gray-800 border border-gray-600 rounded pl-6 pr-6 py-0.5 text-white text-xs w-64"
-                />
-              </div>
-              {isMetricsTab && (
-                <button
-                  onClick={loadMetricsData}
-                  disabled={metricsLoading}
-                  className="p-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
-                  title="Refresh"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${metricsLoading ? 'animate-spin' : ''}`} />
-                </button>
-              )}
-            </div>
-            {isMetricsTab && (
-              <div className="flex items-center gap-4 text-xs">
-                <span className="text-gray-400">
-                  Total: <span className="text-white font-medium">{filteredData.length.toLocaleString()}</span> {activeTab === 'events' ? 'events' : 'metrics'}
-                </span>
-              </div>
-            )}
-          </>
-        )}
-      </div>
+        </div>
+      ) : isMetricsTab ? (
+        <PageToolbar
+          left={<ToolbarSearch value={search} onChange={setSearch} placeholder={`Search ${activeTab === 'events' ? 'events' : 'metrics'}...`} />}
+          right={<>
+            <span className="text-xs text-gray-400">
+              <span className="text-white font-medium">{filteredData.length.toLocaleString()}</span>
+              {filteredData.length !== currentData.length && ` of ${currentData.length.toLocaleString()}`} {activeTab === 'events' ? 'events' : 'metrics'}
+            </span>
+          </>}
+        />
+      ) : (
+        <ToolbarSlot ref={setToolbarEl} />
+      )}
 
-      <div className="border-b border-gray-700 px-1.5 flex items-center gap-1 shrink-0">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => { setActiveTab(id); setSearch(''); }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
-              activeTab === id
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            <Icon className="w-3 h-3" />
-            {label}
-          </button>
-        ))}
-      </div>
+      <PageTabs tabs={tabs} active={activeTab} onChange={(id) => { setActiveTab(id); setSearch(''); }} />
 
       <div className={`flex-1 overflow-hidden ${isDashboardTab ? '' : 'px-1.5 pt-3 pb-4'}`}>
         {isDashboardTab && <DashboardTab filterBarContainer={dashboardFilterBarEl} />}
         {isMetricsTab && (
-          <AgGridReact<MetricRow | EventRow>
-            theme={gridTheme}
-            rowData={filteredData}
-            columnDefs={columnDefs}
-            defaultColDef={defaultColDef}
-            loading={metricsLoading}
-            animateRows={false}
-            suppressCellFocus={true}
-            enableCellTextSelection={true}
-            getRowId={(params) => (params.data as MetricRow).metric || (params.data as EventRow).event}
-          />
+          <div className="h-full bg-gray-900 border border-gray-700 rounded overflow-hidden">
+            <AgGridReact<MetricRow | EventRow>
+              theme={gridTheme}
+              rowData={filteredData}
+              columnDefs={columnDefs}
+              defaultColDef={defaultColDef}
+              loading={metricsLoading}
+              animateRows={false}
+              suppressCellFocus={true}
+              enableCellTextSelection={true}
+              getRowId={(params) => (params.data as MetricRow).metric || (params.data as EventRow).event}
+            />
+          </div>
         )}
         {activeTab === 'errors' && (
           <SystemTable
@@ -237,7 +207,7 @@ export function InstancePage() {
             fetchColumns={fetchErrorsColumns}
             getRowId={(data) => `${data.name}-${data.code}-${data.last_error_time}`}
             hideHeader
-            search={search}
+            toolbarContainer={toolbarEl}
           />
         )}
         {activeTab === 'settings' && (
@@ -247,7 +217,7 @@ export function InstancePage() {
             getRowId={(data) => String(data.name)}
             hideHeader
             columnWidthOverrides={{ name: 400 }}
-            search={search}
+            toolbarContainer={toolbarEl}
           />
         )}
         {activeTab === 'disks' && (
@@ -257,7 +227,7 @@ export function InstancePage() {
             defaultVisibleFields={DISKS_DEFAULT_VISIBLE_FIELDS}
             getRowId={(data) => String(data.name)}
             hideHeader
-            search={search}
+            toolbarContainer={toolbarEl}
           />
         )}
         {activeTab === 'storagePolicies' && (
@@ -267,7 +237,7 @@ export function InstancePage() {
             defaultVisibleFields={STORAGE_POLICIES_DEFAULT_VISIBLE_FIELDS}
             getRowId={(data) => `${data.policy_name}-${data.volume_name}`}
             hideHeader
-            search={search}
+            toolbarContainer={toolbarEl}
           />
         )}
         {activeTab === 'warnings' && (
@@ -276,7 +246,7 @@ export function InstancePage() {
             fetchColumns={fetchWarningsColumns}
             getRowId={(data) => String(data.message)}
             hideHeader
-            search={search}
+            toolbarContainer={toolbarEl}
           />
         )}
       </div>

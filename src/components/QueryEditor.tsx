@@ -3,6 +3,7 @@ import { Play, X, Loader2, Copy, Check, ChevronDown, ChevronRight, Clock, Table 
 import { executeQuery, fetchExplainByType, fetchExplainJson, type ExplainType, type QueryResult } from '../services/api';
 import { QueryPlanVisualizer } from './QueryPlanVisualizer';
 import { formatNumber, formatDuration } from '../utils/formatters';
+import { LoadingState } from './ui';
 
 interface QueryEditorProps {
   initialQuery?: string;
@@ -283,9 +284,7 @@ export function QueryEditor({ initialQuery = '', onClose }: QueryEditorProps) {
                 )}
 
                 {executing && (
-                  <div className="flex items-center justify-center h-full">
-                    <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
-                  </div>
+                  <LoadingState label="Running query…" />
                 )}
 
                 {!executing && !error && !results && (
@@ -401,9 +400,7 @@ export function QueryEditor({ initialQuery = '', onClose }: QueryEditorProps) {
                         </div>
                       )}
                       {executing && (
-                        <div className="flex items-center justify-center h-full">
-                          <Loader2 className="w-6 h-6 text-blue-500 animate-spin" />
-                        </div>
+                        <LoadingState label="Running query…" />
                       )}
                       {results && (
                         <div>
@@ -424,9 +421,7 @@ export function QueryEditor({ initialQuery = '', onClose }: QueryEditorProps) {
                   )}
 
                   {query.trim() && activeExplainTab !== 'performance' && explainLoading[activeExplainTab] && (
-                    <div className="flex items-center justify-center h-full">
-                      <Loader2 className="w-6 h-6 text-blue-500 animate-spin" />
-                    </div>
+                    <LoadingState label="Running EXPLAIN…" />
                   )}
 
                   {query.trim() && activeExplainTab !== 'performance' && explainErrors[activeExplainTab] && (
