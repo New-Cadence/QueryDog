@@ -459,7 +459,8 @@ function SystemTableInner({
           tooltipShowDelay={300}
           tooltipInteraction={true}
           quickFilterText={search || undefined}
-          getRowId={getRowId ? (params) => getRowId(params.data) : undefined}
+          // On a cluster the same row comes back once per node, tagged with hostname
+          getRowId={getRowId ? (params) => `${params.data.hostname ?? ''}|${getRowId(params.data)}` : undefined}
           initialState={defaultSort ? {
             sort: {
               sortModel: defaultSort

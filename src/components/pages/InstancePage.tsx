@@ -29,12 +29,14 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 type InstanceTab = 'dashboard' | 'metrics' | 'async' | 'events' | 'errors' | 'warnings' | 'settings' | 'disks' | 'storagePolicies';
 
 interface MetricRow {
+  hostname?: string;
   metric: string;
   value: number | string;
   description: string;
 }
 
 interface EventRow {
+  hostname?: string;
   event: string;
   value: number | string;
   description: string;
@@ -109,11 +111,16 @@ export function InstancePage() {
     return currentData.filter(row => {
       const name = (row as MetricRow).metric || (row as EventRow).event || '';
       return name.toLowerCase().includes(lowerSearch) ||
-        row.description.toLowerCase().includes(lowerSearch);
+        row.description.toLowerCase().includes(lowerSearch) ||
+        (row.hostname ?? '').toLowerCase().includes(lowerSearch);
     });
   }, [currentData, search, isMetricsTab]);
 
+  // On a cluster each metric comes back once per node, tagged with hostname
+  const hasHost = currentData.some(row => row.hostname);
+
   const columnDefs = useMemo((): ColDef<MetricRow | EventRow>[] => [
+    ...(hasHost ? [{ headerName: 'Host', field: 'hostname' as const, sortable: true, resizable: true, width: 260 }] : []),
     {
       headerName: activeTab === 'events' ? 'Event' : 'Metric',
       field: nameField as 'metric' | 'event',
@@ -140,7 +147,7 @@ export function InstancePage() {
       flex: 1,
       cellStyle: { color: '#9ca3af' } as const,
     },
-  ], [activeTab, nameField]);
+  ], [activeTab, nameField, hasHost]);
 
   const defaultColDef = useMemo<ColDef>(() => ({
     resizable: true,
@@ -197,7 +204,7 @@ export function InstancePage() {
               animateRows={false}
               suppressCellFocus={true}
               enableCellTextSelection={true}
-              getRowId={(params) => (params.data as MetricRow).metric || (params.data as EventRow).event}
+              getRowId={(params) => `${params.data.hostname ?? ''}|${(params.data as MetricRow).metric || (params.data as EventRow).event}`}
             />
           </div>
         )}

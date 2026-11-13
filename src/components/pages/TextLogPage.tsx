@@ -27,6 +27,7 @@ import { GRID_OVERLAYS } from '../gridOverlays';
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 const FILTERABLE_FIELDS = [
+  { field: 'hostname', label: 'Host' },
   { field: 'level', label: 'Level' },
   { field: 'logger_name', label: 'Logger' },
   { field: 'thread_name', label: 'Thread' },
@@ -159,6 +160,13 @@ export function TextLogPage() {
       sortable: true,
       sort: 'desc',
       valueFormatter: (params) => formatDateTime(params.value),
+    },
+    {
+      headerName: 'Host',
+      field: 'hostname',
+      width: 170,
+      sortable: true,
+      tooltipField: 'hostname',
     },
     {
       headerName: 'Level',
@@ -483,7 +491,7 @@ export function TextLogPage() {
               defaultColDef={defaultColDef}
               onSortChanged={onSortChanged}
               onRowClicked={onRowClicked}
-              getRowId={(params) => `${params.data.event_time}-${params.data.message?.slice(0, 50)}`}
+              getRowId={(params) => `${params.data.hostname}-${params.data.event_time_microseconds}-${params.data.thread_id}-${params.data.message}`}
               rowSelection="single"
               suppressCellFocus={true}
               enableCellTextSelection={true}

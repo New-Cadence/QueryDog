@@ -524,6 +524,13 @@ function getSystemTable(tableName) {
   return `system.${tableName}`;
 }
 
+// For system tables without their own hostname column: on a cluster, tag each
+// row with the replica it came from. Empty on a single server.
+const HOST_COLUMN_META = { name: 'hostname', type: 'String', comment: 'Node the row came from' };
+function hostColumn() {
+  return scopedEnv()?.cluster ? 'hostName() AS hostname, ' : '';
+}
+
 // Wrap an async route handler so thrown errors propagate to the Express
 // error middleware below instead of needing a try/catch per route.
 function asyncHandler(fn) {
@@ -531,11 +538,13 @@ function asyncHandler(fn) {
 }
 
 // Build an Express handler that returns column metadata for a system.<table>.
-function columnsHandler(systemTable) {
+// withHost: the data route selects hostColumn(), so list it first on a cluster.
+function columnsHandler(systemTable, { withHost = false } = {}) {
   return asyncHandler(async (req, res) => {
     const query = `SELECT name, type, comment FROM system.columns WHERE database = 'system' AND table = '${systemTable}' ORDER BY position`;
     const result = await client.query({ query, format: 'JSONEachRow' });
-    res.json(await result.json());
+    const columns = await result.json();
+    res.json(withHost && hostColumn() ? [HOST_COLUMN_META, ...columns] : columns);
   });
 }
 
@@ -3145,7 +3154,7 @@ app.get('/api/dictionaries', asyncHandler(async (req, res) => {
 
   const query = `
     SELECT
-      database,
+      ${hostColumn()}database,
       name,
       uuid,
       status,
@@ -3168,7 +3177,7 @@ app.get('/api/dictionaries', asyncHandler(async (req, res) => {
       last_successful_update_time,
       loading_duration,
       last_exception
-    FROM system.dictionaries
+    FROM ${getSystemTable('dictionaries')}
     ${whereClause}
     ORDER BY database, name
   `;
@@ -3315,7 +3324,7 @@ app.get('/api/data-skipping-indexes', asyncHandler(async (req, res) => {
 
 // Get system.metrics
 app.get('/api/metrics', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.metrics ORDER BY metric`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('metrics')} ORDER BY metric`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
@@ -3323,7 +3332,7 @@ app.get('/api/metrics', asyncHandler(async (req, res) => {
 
 // Get system.asynchronous_metrics
 app.get('/api/async-metrics', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.asynchronous_metrics ORDER BY metric`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('asynchronous_metrics')} ORDER BY metric`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
@@ -3331,7 +3340,7 @@ app.get('/api/async-metrics', asyncHandler(async (req, res) => {
 
 // Get system.events
 app.get('/api/events', asyncHandler(async (req, res) => {
-  const query = `SELECT event, value, description FROM system.events ORDER BY event`;
+  const query = `SELECT ${hostColumn()}event, value, description FROM ${getSystemTable('events')} ORDER BY event`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
@@ -3339,25 +3348,25 @@ app.get('/api/events', asyncHandler(async (req, res) => {
 
 // Get system.errors
 app.get('/api/errors', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.errors ORDER BY last_error_time DESC`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('errors')} ORDER BY last_error_time DESC`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
 }));
 
 // Get system.errors columns
-app.get('/api/errors/columns', columnsHandler('errors'));
+app.get('/api/errors/columns', columnsHandler('errors', { withHost: true }));
 
 // Get system.warnings
 app.get('/api/warnings', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.warnings ORDER BY message`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('warnings')} ORDER BY message`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
 }));
 
 // Get system.warnings columns
-app.get('/api/warnings/columns', columnsHandler('warnings'));
+app.get('/api/warnings/columns', columnsHandler('warnings', { withHost: true }));
 
 // ==================== INSTANCE ENDPOINTS ====================
 
@@ -3482,7 +3491,7 @@ app.get('/api/row-policies/columns', columnsHandler('row_policies'));
 app.get('/api/session-log', asyncHandler(async (req, res) => {
   const query = `
     SELECT *
-    FROM system.session_log
+    FROM ${getSystemTable('session_log')}
     ORDER BY event_time DESC
     LIMIT 1000
   `;
@@ -4625,7 +4634,7 @@ app.get('/api/text-log', asyncHandler(async (req, res) => {
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
   // Validate sort field
-  const allowedSortFields = ['event_time', 'level', 'logger_name', 'message', 'thread_name', 'thread_id', 'query_id'];
+  const allowedSortFields = ['event_time', 'hostname', 'level', 'logger_name', 'message', 'thread_name', 'thread_id', 'query_id'];
   const safeSortField = allowedSortFields.includes(sortField) ? sortField : 'event_time';
   const safeSortOrder = sortOrder === 'ASC' ? 'ASC' : 'DESC';
 
@@ -4774,7 +4783,7 @@ app.get('/api/text-log/distinct/:field', asyncHandler(async (req, res) => {
   const { field } = req.params;
   const { start, end, limit = 100 } = req.query;
 
-  const allowedFields = ['level', 'logger_name', 'thread_name', 'query_id'];
+  const allowedFields = ['hostname', 'level', 'logger_name', 'thread_name', 'query_id'];
 
   if (!allowedFields.includes(field)) {
     return res.status(400).json({ error: 'Invalid field' });
@@ -5226,9 +5235,9 @@ app.get('/api/my-queries/run-log/:filename', asyncHandler(async (req, res) => {
 app.get('/api/cluster/replication-queue', asyncHandler(async (req, res) => {
   const query = `
     SELECT
-      database, table, replica_name, is_leader, is_readonly,
+      ${hostColumn()}database, table, replica_name, is_leader, is_readonly,
       future_parts, parts_to_check, queue_size, last_queue_update_exception
-    FROM system.replicas
+    FROM ${getSystemTable('replicas')}
     ORDER BY database, table, replica_name
   `;
   const result = await client.query({ query, format: 'JSONEachRow' });
@@ -5239,6 +5248,7 @@ app.get('/api/cluster/replication-queue', asyncHandler(async (req, res) => {
 // Get system.replication_queue columns (using replicas table for this view)
 app.get('/api/cluster/replication-queue/columns', asyncHandler(async (req, res) => {
   const columns = [
+    ...(hostColumn() ? [HOST_COLUMN_META] : []),
     { name: 'database', type: 'String', comment: 'Database name' },
     { name: 'table', type: 'String', comment: 'Table name' },
     { name: 'replica_name', type: 'String', comment: 'Replica name in ZooKeeper' },
@@ -5255,9 +5265,9 @@ app.get('/api/cluster/replication-queue/columns', asyncHandler(async (req, res) 
 // Get grouped replication queue errors
 app.get('/api/cluster/replication-queue/grouped', asyncHandler(async (req, res) => {
   const query = `
-    SELECT table, last_exception, postpone_reason, count() as count
-    FROM system.replication_queue
-    GROUP BY table, last_exception, postpone_reason
+    SELECT ${hostColumn()}table, last_exception, postpone_reason, count() as count
+    FROM ${getSystemTable('replication_queue')}
+    GROUP BY ${hostColumn() ? 'hostname, ' : ''}table, last_exception, postpone_reason
     ORDER BY count DESC
   `;
   const result = await client.query({ query, format: 'JSONEachRow' });
@@ -5267,14 +5277,14 @@ app.get('/api/cluster/replication-queue/grouped', asyncHandler(async (req, res) 
 
 // Get system.replicas
 app.get('/api/cluster/replicas', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.replicas ORDER BY database, table, replica_name`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('replicas')} ORDER BY database, table, replica_name`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
 }));
 
 // Get system.replicas columns
-app.get('/api/cluster/replicas/columns', columnsHandler('replicas'));
+app.get('/api/cluster/replicas/columns', columnsHandler('replicas', { withHost: true }));
 
 // Get system.clusters
 app.get('/api/cluster/clusters', asyncHandler(async (req, res) => {
@@ -5289,14 +5299,14 @@ app.get('/api/cluster/clusters/columns', columnsHandler('clusters'));
 
 // Get system.replicated_fetches
 app.get('/api/cluster/fetches', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.replicated_fetches ORDER BY database, table`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('replicated_fetches')} ORDER BY database, table`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
 }));
 
 // Get system.replicated_fetches columns
-app.get('/api/cluster/fetches/columns', columnsHandler('replicated_fetches'));
+app.get('/api/cluster/fetches/columns', columnsHandler('replicated_fetches', { withHost: true }));
 
 // Get system.distributed_ddl_queue
 app.get('/api/cluster/distributed-ddl', asyncHandler(async (req, res) => {
@@ -5322,18 +5332,18 @@ app.get('/api/cluster/zookeeper/columns', columnsHandler('zookeeper'));
 
 // Get system.zookeeper_connection
 app.get('/api/cluster/zookeeper-connection', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.zookeeper_connection LIMIT 1000`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('zookeeper_connection')} LIMIT 1000`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
 }));
 
 // Get system.zookeeper_connection columns
-app.get('/api/cluster/zookeeper-connection/columns', columnsHandler('zookeeper_connection'));
+app.get('/api/cluster/zookeeper-connection/columns', columnsHandler('zookeeper_connection', { withHost: true }));
 
 // Get system.zookeeper_connection_log
 app.get('/api/cluster/zookeeper-connection-log', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.zookeeper_connection_log ORDER BY event_time DESC LIMIT 1000`;
+  const query = `SELECT * FROM ${getSystemTable('zookeeper_connection_log')} ORDER BY event_time DESC LIMIT 1000`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
@@ -5344,7 +5354,7 @@ app.get('/api/cluster/zookeeper-connection-log/columns', columnsHandler('zookeep
 
 // Get system.zookeeper_log
 app.get('/api/cluster/zookeeper-log', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.zookeeper_log ORDER BY event_time DESC LIMIT 1000`;
+  const query = `SELECT * FROM ${getSystemTable('zookeeper_log')} ORDER BY event_time DESC LIMIT 1000`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
@@ -5355,14 +5365,14 @@ app.get('/api/cluster/zookeeper-log/columns', columnsHandler('zookeeper_log'));
 
 // Get system.distribution_queue
 app.get('/api/cluster/distribution-queue', asyncHandler(async (req, res) => {
-  const query = `SELECT * FROM system.distribution_queue ORDER BY data_path LIMIT 1000`;
+  const query = `SELECT ${hostColumn()}* FROM ${getSystemTable('distribution_queue')} ORDER BY data_path LIMIT 1000`;
   const result = await client.query({ query, format: 'JSONEachRow' });
   const data = await result.json();
   res.json(data);
 }));
 
 // Get system.distribution_queue columns
-app.get('/api/cluster/distribution-queue/columns', columnsHandler('distribution_queue'));
+app.get('/api/cluster/distribution-queue/columns', columnsHandler('distribution_queue', { withHost: true }));
 
 // ==================== METRIC LOG API (Dashboard) ====================
 

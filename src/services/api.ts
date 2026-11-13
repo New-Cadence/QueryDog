@@ -1334,6 +1334,7 @@ export async function fetchViewDefinition(
 
 // System-wide dictionaries API
 export interface SystemDictionary {
+  hostname?: string;
   database: string;
   name: string;
   uuid: string;
@@ -1421,6 +1422,7 @@ export async function fetchDataSkippingIndexes(
 // ==================== TEXT LOG API ====================
 
 export interface TextLogEntry {
+  hostname?: string;
   event_time: string;
   event_time_microseconds: string;
   event_date: string;
