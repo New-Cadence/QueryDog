@@ -1,5 +1,6 @@
 import type { Recommendation, RecommendationProvider } from './types';
 import { fmtBytes, num, queryRows, sqlString, str, systemTables } from './performance';
+import { nodes, type Nodes } from './cluster';
 
 // Reliability recommendations: replication health, stuck mutations, detached
 // parts, disk space, dictionaries, server errors, Keeper sessions, backups and
@@ -14,11 +15,11 @@ function hashText(s: string): string {
   return h.toString(36);
 }
 
-async function replicaChecks(): Promise<Recommendation[]> {
+async function replicaChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
-    SELECT database, table, is_readonly, is_session_expired, absolute_delay, queue_size, total_replicas, active_replicas,
+    SELECT hostName() AS host, database, table, is_readonly, is_session_expired, absolute_delay, queue_size, total_replicas, active_replicas,
       last_queue_update_exception, zookeeper_exception
-    FROM system.replicas
+    FROM ${n.table('replicas')}
     WHERE is_readonly OR is_session_expired OR absolute_delay >= 60 OR queue_size >= 100 OR active_replicas < total_replicas
     LIMIT 50`);
   const recs: Recommendation[] = [];
@@ -26,7 +27,7 @@ async function replicaChecks(): Promise<Recommendation[]> {
     const table = `${str(r.database)}.${str(r.table)}`;
     const exception = str(r.zookeeper_exception) || str(r.last_queue_update_exception);
     if (num(r.is_readonly) || num(r.is_session_expired)) {
-      recs.push({
+      recs.push(n.tag<Recommendation>({
         id: `reliability:replica-readonly:${table}`,
         category: 'reliability',
         severity: 'critical',
@@ -36,11 +37,11 @@ async function replicaChecks(): Promise<Recommendation[]> {
         target: table,
         impact: 'Inserts rejected on this replica',
         remediation: `-- Check Keeper connectivity, then restart the replica:\nSELECT * FROM system.zookeeper_connection;\nSYSTEM RESTART REPLICA ${table};`,
-      });
+      }, r.host));
     }
     const delay = num(r.absolute_delay);
     if (delay >= 60 || num(r.queue_size) >= 100) {
-      recs.push({
+      recs.push(n.tag<Recommendation>({
         id: `reliability:replica-lag:${table}`,
         category: 'reliability',
         severity: delay >= 300 ? 'high' : 'medium',
@@ -49,10 +50,10 @@ async function replicaChecks(): Promise<Recommendation[]> {
         target: table,
         impact: `${delay}s behind`,
         remediation: `-- See what the replication queue is stuck on:\nSELECT type, create_time, num_tries, last_exception, postpone_reason\nFROM system.replication_queue\nWHERE database = ${sqlString(str(r.database))} AND table = ${sqlString(str(r.table))}\nORDER BY create_time LIMIT 20;`,
-      });
+      }, r.host));
     }
     if (num(r.active_replicas) < num(r.total_replicas)) {
-      recs.push({
+      recs.push(n.tag<Recommendation>({
         id: `reliability:replica-inactive:${table}`,
         category: 'reliability',
         severity: 'high',
@@ -61,24 +62,24 @@ async function replicaChecks(): Promise<Recommendation[]> {
         target: table,
         impact: 'Reduced redundancy',
         remediation: `SELECT replica_name, is_active FROM system.zookeeper\nWHERE path = (SELECT concat(zookeeper_path, '/replicas') FROM system.replicas WHERE database = ${sqlString(str(r.database))} AND table = ${sqlString(str(r.table))});\n\n-- If a replica is permanently gone:\n-- SYSTEM DROP REPLICA '<replica_name>' FROM TABLE ${table};`,
-      });
+      }, r.host));
     }
   }
   return recs;
 }
 
-async function mutationChecks(): Promise<Recommendation[]> {
+async function mutationChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
-    SELECT database, table, mutation_id, command, toString(create_time) AS created, parts_to_do, latest_fail_reason,
+    SELECT hostName() AS host, database, table, mutation_id, command, toString(create_time) AS created, parts_to_do, latest_fail_reason,
       dateDiff('minute', create_time, now()) AS age_min
-    FROM system.mutations
+    FROM ${n.storage('mutations')}
     WHERE is_done = 0 AND NOT is_killed AND (create_time < now() - INTERVAL 15 MINUTE OR latest_fail_reason != '')
     ORDER BY create_time
     LIMIT 30`);
   return rows.map(r => {
     const table = `${str(r.database)}.${str(r.table)}`;
     const failing = str(r.latest_fail_reason) !== '';
-    return {
+    return n.tagStorage<Recommendation>({
       id: `reliability:stuck-mutation:${table}:${str(r.mutation_id)}`,
       category: 'reliability' as const,
       severity: failing ? 'high' : 'medium',
@@ -89,16 +90,16 @@ async function mutationChecks(): Promise<Recommendation[]> {
       target: table,
       impact: failing ? 'Blocks later mutations; retries forever' : 'Holds back later mutations',
       remediation: `KILL MUTATION WHERE database = ${sqlString(str(r.database))} AND table = ${sqlString(str(r.table))} AND mutation_id = ${sqlString(str(r.mutation_id))};`,
-    };
+    }, r.host);
   });
 }
 
-async function detachedPartChecks(): Promise<Recommendation[]> {
+async function detachedPartChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
-    SELECT database, table, reason, count() AS parts, sum(bytes_on_disk) AS bytes, groupArray(5)(name) AS names
-    FROM system.detached_parts
+    SELECT hostName() AS host, database, table, reason, count() AS parts, sum(bytes_on_disk) AS bytes, groupArray(5)(name) AS names
+    FROM ${n.storage('detached_parts')}
     WHERE database IS NOT NULL
-    GROUP BY database, table, reason
+    GROUP BY host, database, table, reason
     ORDER BY bytes DESC
     LIMIT 30`);
   return rows.map(r => {
@@ -106,7 +107,7 @@ async function detachedPartChecks(): Promise<Recommendation[]> {
     const reason = str(r.reason);
     const broken = /broken|unexpected|covered-by-broken|noquorum/.test(reason);
     const names = (r.names as string[]) || [];
-    return {
+    return n.tagStorage<Recommendation>({
       id: `reliability:detached-parts:${table}:${reason || 'manual'}`,
       category: 'reliability' as const,
       severity: broken ? 'high' : 'low',
@@ -119,21 +120,21 @@ async function detachedPartChecks(): Promise<Recommendation[]> {
         ? `-- Inspect, and re-attach if the data is valid:\nALTER TABLE ${table} ATTACH PART ${sqlString(names[0] || '<part>')};\n\n`
         : '') +
         `-- Remove once no longer needed:\n` +
-        names.map(n => `ALTER TABLE ${table} DROP DETACHED PART ${sqlString(n)} SETTINGS allow_drop_detached = 1;`).join('\n'),
-    };
+        names.map(part => `ALTER TABLE ${table} DROP DETACHED PART ${sqlString(part)} SETTINGS allow_drop_detached = 1;`).join('\n'),
+    }, r.host);
   });
 }
 
-async function diskChecks(): Promise<Recommendation[]> {
+async function diskChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
-    SELECT name, path, free_space, total_space, is_broken
-    FROM system.disks
+    SELECT hostName() AS host, name, path, free_space, total_space, is_broken
+    FROM ${n.table('disks')}
     WHERE total_space > 0 AND NOT is_remote AND (is_broken OR free_space < 0.2 * total_space)
     LIMIT 20`);
   return rows.map(r => {
     const free = num(r.free_space) / Math.max(num(r.total_space), 1);
     const broken = !!num(r.is_broken);
-    return {
+    return n.tag<Recommendation>({
       id: `reliability:disk:${str(r.name)}`,
       category: 'reliability' as const,
       severity: broken || free < 0.1 ? 'critical' : 'high',
@@ -146,19 +147,19 @@ async function diskChecks(): Promise<Recommendation[]> {
       impact: broken ? 'Data unavailable' : `${(free * 100).toFixed(0)}% free`,
       remediation: `-- Largest tables on this disk:\nSELECT database, table, sum(bytes_on_disk) AS bytes FROM system.parts\nWHERE active AND disk_name = ${sqlString(str(r.name))}\nGROUP BY database, table ORDER BY bytes DESC LIMIT 20;\n\n` +
         '-- Free space with a TTL, by dropping old partitions, or add a volume to the storage policy.',
-    };
+    }, r.host);
   });
 }
 
-async function dictionaryChecks(): Promise<Recommendation[]> {
+async function dictionaryChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
-    SELECT database, name, toString(status) AS status, last_exception
-    FROM system.dictionaries
+    SELECT hostName() AS host, database, name, toString(status) AS status, last_exception
+    FROM ${n.table('dictionaries')}
     WHERE status IN ('FAILED', 'FAILED_AND_RELOADING') OR last_exception != ''
     LIMIT 30`);
   return rows.map(r => {
     const name = str(r.database) ? `${str(r.database)}.${str(r.name)}` : str(r.name);
-    return {
+    return n.tag<Recommendation>({
       id: `reliability:dictionary:${name}`,
       category: 'reliability' as const,
       severity: 'high',
@@ -167,7 +168,7 @@ async function dictionaryChecks(): Promise<Recommendation[]> {
       target: name,
       impact: 'dictGet queries fail',
       remediation: `-- Fix the source, then:\nSYSTEM RELOAD DICTIONARY ${name};`,
-    };
+    }, r.host);
   });
 }
 
@@ -179,17 +180,17 @@ const SERIOUS_ERRORS = [
   'TOO_MANY_SIMULTANEOUS_QUERIES', 'TIMEOUT_EXCEEDED', 'S3_ERROR', 'CANNOT_WRITE_TO_FILE_DESCRIPTOR', 'POCO_EXCEPTION', 'LOGICAL_ERROR',
 ];
 
-async function errorChecks(): Promise<Recommendation[]> {
+async function errorChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
-    SELECT name, code, value, toString(last_error_time) AS last_time, last_error_message
-    FROM system.errors
+    SELECT hostName() AS host, name, code, value, toString(last_error_time) AS last_time, last_error_message
+    FROM ${n.table('errors')}
     WHERE last_error_time >= now() - INTERVAL 1 HOUR AND remote = 0 AND name IN (${SERIOUS_ERRORS.map(sqlString).join(', ')})
     ORDER BY value DESC
     LIMIT 20`);
   return rows.map(r => {
     const count = num(r.value);
     const name = str(r.name);
-    return {
+    return n.tag<Recommendation>({
       id: `reliability:error:${name}`,
       category: 'reliability' as const,
       severity: name === 'LOGICAL_ERROR' || name === 'CORRUPTED_DATA' || name === 'CHECKSUM_DOESNT_MATCH' ? 'high' : count >= 100 ? 'medium' : 'low',
@@ -198,19 +199,24 @@ async function errorChecks(): Promise<Recommendation[]> {
       target: 'server',
       impact: `${count.toLocaleString()} occurrences`,
       remediation: `-- Recent queries that hit this error:\nSELECT event_time, user, query_id, exception FROM system.query_log\nWHERE event_time >= now() - INTERVAL 1 HOUR AND exception_code = ${num(r.code)}\nORDER BY event_time DESC LIMIT 20;`,
-    };
+    }, r.host);
   });
 }
 
-async function keeperChecks(tables: Set<string>): Promise<Recommendation[]> {
+async function keeperChecks(n: Nodes, tables: Set<string>): Promise<Recommendation[]> {
   const replicated = await queryRows("SELECT count() AS c FROM system.tables WHERE engine LIKE 'Replicated%' LIMIT 1");
   if (!num(replicated[0]?.c)) return [];
-  const rows = tables.has('zookeeper_connection')
-    ? await queryRows('SELECT name, host, port, is_expired, session_uptime_elapsed_seconds AS uptime FROM system.zookeeper_connection LIMIT 10')
-    : [];
+  const [rows, nodeRows] = await Promise.all([
+    tables.has('zookeeper_connection')
+      ? queryRows(`SELECT hostName() AS node, name, host, port, is_expired, session_uptime_elapsed_seconds AS uptime FROM ${n.table('zookeeper_connection')} LIMIT 100`)
+      : Promise.resolve([]),
+    queryRows(`SELECT DISTINCT hostName() AS node FROM ${n.table('one')}`),
+  ]);
   const recs: Recommendation[] = [];
-  if (!rows.length) {
-    recs.push({
+  // Nodes that answered but have no Keeper session
+  const withSession = new Set(rows.map(r => str(r.node)));
+  for (const node of nodeRows.map(r => str(r.node)).filter(h => !withSession.has(h))) {
+    recs.push(n.tag<Recommendation>({
       id: 'reliability:keeper:no-session',
       category: 'reliability',
       severity: 'critical',
@@ -219,11 +225,11 @@ async function keeperChecks(tables: Set<string>): Promise<Recommendation[]> {
       target: 'keeper',
       impact: 'Replicated inserts fail',
       remediation: "-- Check the <zookeeper> section of the server config and Keeper availability, then:\nSELECT * FROM system.zookeeper_connection;",
-    });
+    }, node));
   }
   for (const r of rows) {
     if (!num(r.is_expired) && num(r.uptime) >= 600) continue;
-    recs.push({
+    recs.push(n.tag<Recommendation>({
       id: `reliability:keeper:${str(r.name)}`,
       category: 'reliability',
       severity: num(r.is_expired) ? 'critical' : 'medium',
@@ -234,12 +240,12 @@ async function keeperChecks(tables: Set<string>): Promise<Recommendation[]> {
       target: `${str(r.host)}:${str(r.port)}`,
       impact: 'Replicated tables may go read-only',
       remediation: "SELECT event_time, message FROM system.text_log\nWHERE logger_name LIKE '%ZooKeeper%' AND event_time >= now() - INTERVAL 1 HOUR\nORDER BY event_time DESC LIMIT 50;",
-    });
+    }, r.node));
   }
   return recs;
 }
 
-async function backupChecks(tables: Set<string>): Promise<Recommendation[]> {
+async function backupChecks(n: Nodes, tables: Set<string>): Promise<Recommendation[]> {
   // ClickHouse Cloud takes backups outside of SQL, so they never show up here.
   const [shared, data] = await Promise.all([
     queryRows("SELECT count() AS c FROM system.tables WHERE engine LIKE 'Shared%' LIMIT 1"),
@@ -247,10 +253,12 @@ async function backupChecks(tables: Set<string>): Promise<Recommendation[]> {
   ]);
   if (num(shared[0]?.c) || num(data[0]?.bytes) < 100 * 1024 ** 2) return [];
 
+  // A backup taken on any node counts
   const source = tables.has('backup_log') ? 'system.backup_log' : 'system.backups';
+  const from = n.table(source.slice('system.'.length));
   const [latest, uptime] = await Promise.all([
-    queryRows(`SELECT toString(max(end_time)) AS last, countIf(end_time >= now() - INTERVAL 7 DAY) AS recent FROM ${source} WHERE status = 'BACKUP_CREATED' LIMIT 1`),
-    queryRows("SELECT toUInt64(value) AS v FROM system.asynchronous_metrics WHERE metric = 'Uptime' LIMIT 1"),
+    queryRows(`SELECT toString(max(end_time)) AS last, countIf(end_time >= now() - INTERVAL 7 DAY) AS recent FROM ${from} WHERE status = 'BACKUP_CREATED' LIMIT 1`),
+    queryRows(`SELECT min(toUInt64(value)) AS v FROM ${n.table('asynchronous_metrics')} WHERE metric = 'Uptime'`),
   ]);
   if (num(latest[0]?.recent)) return [];
   // system.backups only covers the current process; don't flag a fresh restart.
@@ -270,11 +278,37 @@ async function backupChecks(tables: Set<string>): Promise<Recommendation[]> {
   }];
 }
 
-async function warningChecks(): Promise<Recommendation[]> {
-  const rows = await queryRows('SELECT message, toString(message_format_string) AS fmt FROM system.warnings LIMIT 50');
+// Nodes ClickHouse currently fails to reach. Cluster-wide reads skip them
+// (skip_unavailable_shards), so without this a down node would just vanish.
+async function unreachableNodeChecks(n: Nodes): Promise<Recommendation[]> {
+  const cluster = n.cluster;
+  if (!cluster) return [];
+  const rows = await queryRows(`
+    SELECT host_name, port, shard_num, replica_num, errors_count, estimated_recovery_time
+    FROM system.clusters
+    WHERE cluster = ${sqlString(cluster)} AND errors_count > 0 AND estimated_recovery_time > 0`);
+  return rows.map(r => {
+    const node = `${str(r.host_name)}:${str(r.port)}`;
+    return {
+      id: `reliability:node-unreachable:${node}`,
+      category: 'reliability' as const,
+      severity: 'critical',
+      title: `Node ${str(r.host_name)} is unreachable`,
+      detail: `Shard ${num(r.shard_num)}, replica ${num(r.replica_num)} of cluster ${cluster} has ${num(r.errors_count)} recent connection error(s). ` +
+        'Other recommendations skip it until it is back, so its own problems are not shown.',
+      target: node,
+      host: str(r.host_name),
+      impact: 'Node missing from cluster-wide checks',
+      remediation: `SELECT host_name, port, errors_count, slowdowns_count, estimated_recovery_time\nFROM system.clusters WHERE cluster = ${sqlString(cluster)};`,
+    };
+  });
+}
+
+async function warningChecks(n: Nodes): Promise<Recommendation[]> {
+  const rows = await queryRows(`SELECT hostName() AS host, message, toString(message_format_string) AS fmt FROM ${n.table('warnings')} LIMIT 200`);
   return rows.map(r => {
     const message = str(r.message);
-    return {
+    return n.tag<Recommendation>({
       id: `reliability:warning:${hashText(str(r.fmt) || message)}`,
       category: 'reliability' as const,
       severity: /memory|disk|space|swap|corrupt/i.test(message) ? 'medium' : 'low',
@@ -282,7 +316,7 @@ async function warningChecks(): Promise<Recommendation[]> {
       detail: message,
       target: 'server',
       remediation: 'Server warnings come from configuration or environment checks at startup; address the condition and restart. Current list:\nSELECT message FROM system.warnings;',
-    };
+    }, r.host);
   });
 }
 
@@ -290,17 +324,18 @@ export const reliabilityProvider: RecommendationProvider = {
   category: 'reliability',
   label: 'Reliability',
   run: async () => {
-    const tables = await systemTables();
+    const [tables, n] = await Promise.all([systemTables(), nodes()]);
     const checks: [string, () => Promise<Recommendation[]>][] = [
-      ['replicas', replicaChecks],
-      ['mutations', mutationChecks],
-      ['detached_parts', detachedPartChecks],
-      ['disks', diskChecks],
-      ['dictionaries', dictionaryChecks],
-      ['errors', errorChecks],
-      ['warnings', warningChecks],
-      ['replicas', () => keeperChecks(tables)],
-      ['parts', () => backupChecks(tables)],
+      ['replicas', () => replicaChecks(n)],
+      ['mutations', () => mutationChecks(n)],
+      ['detached_parts', () => detachedPartChecks(n)],
+      ['disks', () => diskChecks(n)],
+      ['dictionaries', () => dictionaryChecks(n)],
+      ['errors', () => errorChecks(n)],
+      ['warnings', () => warningChecks(n)],
+      ['clusters', () => unreachableNodeChecks(n)],
+      ['replicas', () => keeperChecks(n, tables)],
+      ['parts', () => backupChecks(n, tables)],
     ];
     const results = await Promise.all(
       checks.filter(([table]) => tables.has(table)).map(([, check]) => check().catch(() => [])),

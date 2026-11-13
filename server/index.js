@@ -3577,7 +3577,7 @@ app.post('/api/explain/:type', asyncHandler(async (req, res) => {
 
 // Execute a query and return results
 app.post('/api/query', asyncHandler(async (req, res) => {
-  let { query: userQuery, limit = 1000 } = req.body;
+  let { query: userQuery, limit = 1000, skipUnavailableNodes } = req.body;
 
   if (!userQuery) {
     return res.status(400).json({ error: 'Query is required' });
@@ -3612,6 +3612,10 @@ app.post('/api/query', asyncHandler(async (req, res) => {
   }
 
   const startTime = Date.now();
+  // Opt-in for cluster-wide reads (recommendations): a down node is left out
+  // instead of failing the whole clusterAllReplicas query. Never set for user
+  // queries, where a silently partial result over a Distributed table would mislead.
+  const clickhouse_settings = skipUnavailableNodes === true ? { skip_unavailable_shards: 1 } : undefined;
 
   // If query already has FORMAT, don't specify format in client options
   // Strip the FORMAT clause and let the query handle it, or use text mode
@@ -3622,12 +3626,14 @@ app.post('/api/query', asyncHandler(async (req, res) => {
     const result = await client.query({
       query: finalQuery,
       format: 'JSONEachRow',
+      clickhouse_settings,
     });
     data = await result.json();
   } else {
     const result = await client.query({
       query: finalQuery,
       format: 'JSONEachRow',
+      clickhouse_settings,
     });
     data = await result.json();
   }

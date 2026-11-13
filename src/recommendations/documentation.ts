@@ -1,5 +1,6 @@
 import { executeQuery } from '../services/api';
 import type { Recommendation, RecommendationProvider, RecommendationSeverity } from './types';
+import { nodes } from './cluster';
 
 // Undocumented tables and columns, ranked by how often they are queried so
 // documentation effort goes where people actually look.
@@ -27,8 +28,9 @@ const MAX_COLUMNS_IN_SQL = 20;
 
 // 7-day query counts per 'db.table', empty when query_log is missing.
 async function queryCounts(): Promise<Map<string, number>> {
+  const queryLog = (await nodes()).table('query_log');
   const rows = await safeRows<{ t: string; q: number }>(`
-    SELECT arrayJoin(tables) AS t, count() AS q FROM system.query_log
+    SELECT arrayJoin(tables) AS t, count() AS q FROM ${queryLog}
     WHERE event_date >= today() - 7 AND event_time >= now() - INTERVAL 7 DAY AND type = 'QueryFinish' AND is_initial_query
     GROUP BY t LIMIT 100000`);
   return new Map(rows.map(r => [r.t, Number(r.q)]));

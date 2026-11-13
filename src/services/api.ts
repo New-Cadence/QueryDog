@@ -1654,11 +1654,13 @@ export interface QueryResult {
   duration: number;
 }
 
-export async function executeQuery(query: string, limit = 1000): Promise<QueryResult> {
+// skipUnavailableNodes: on a cluster, leave out unreachable nodes instead of
+// failing (for clusterAllReplicas reads that should survive a node outage)
+export async function executeQuery(query: string, limit = 1000, opts: { skipUnavailableNodes?: boolean } = {}): Promise<QueryResult> {
   const response = await fetch(`${API_BASE}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, limit }),
+    body: JSON.stringify({ query, limit, ...opts }),
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));

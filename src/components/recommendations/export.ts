@@ -20,15 +20,16 @@ export function exportMarkdown(rows: RecommendationRow[], env: string) {
     '',
     `Generated ${new Date().toLocaleString()} - ${rows.length} recommendation(s)` + (savings ? `, potential savings ${formatMoney(savings)}/month` : ''),
     '',
-    '| Severity | Category | Title | Target | Status |',
-    '| --- | --- | --- | --- | --- |',
-    ...rows.map(r => `| ${r.severity} | ${CATEGORY_META[r.category].label} | ${r.title.replace(/\|/g, '\\|')} | ${(r.target || '').replace(/\|/g, '\\|')} | ${r.status} |`),
+    '| Severity | Category | Title | Target | Host | Status |',
+    '| --- | --- | --- | --- | --- | --- |',
+    ...rows.map(r => `| ${r.severity} | ${CATEGORY_META[r.category].label} | ${r.title.replace(/\|/g, '\\|')} | ${(r.target || '').replace(/\|/g, '\\|')} | ${r.host || ''} | ${r.status} |`),
     '',
   ];
   for (const r of rows) {
     lines.push(`## [${r.severity.toUpperCase()}] ${r.title}`, '');
     lines.push(`- **Category:** ${CATEGORY_META[r.category].label}`);
     if (r.target) lines.push(`- **Target:** ${r.target}`);
+    if (r.host) lines.push(`- **Host:** ${r.host}`);
     if (r.impact) lines.push(`- **Impact:** ${r.impact}`);
     if (r.estimatedMonthlySaving) lines.push(`- **Estimated saving:** ${formatMoney(r.estimatedMonthlySaving)}/month`);
     lines.push(`- **Status:** ${r.status}${r.reason ? ` (${r.reason})` : ''}`, '', r.detail, '');
@@ -43,9 +44,9 @@ const csvCell = (v: unknown) => {
 };
 
 export function exportCsv(rows: RecommendationRow[]) {
-  const header = ['id', 'category', 'severity', 'status', 'title', 'target', 'impact', 'estimated_monthly_saving', 'detail', 'remediation', 'first_seen', 'last_seen', 'reason'];
+  const header = ['id', 'category', 'severity', 'status', 'title', 'target', 'host', 'impact', 'estimated_monthly_saving', 'detail', 'remediation', 'first_seen', 'last_seen', 'reason'];
   const body = rows.map(r =>
-    [r.id, r.category, r.severity, r.status, r.title, r.target, r.impact, r.estimatedMonthlySaving, r.detail, r.remediation, r.firstSeen, r.lastSeen, r.reason]
+    [r.id, r.category, r.severity, r.status, r.title, r.target, r.host, r.impact, r.estimatedMonthlySaving, r.detail, r.remediation, r.firstSeen, r.lastSeen, r.reason]
       .map(csvCell)
       .join(','),
   );
