@@ -5,6 +5,7 @@ import { Activity, GitMerge, Cpu, HardDrive, Layers, Database } from 'lucide-rea
 import {
   fetchMetricLogTimeSeries,
   fetchAsyncMetricLogTimeSeries,
+  fetchMetricLogNodes,
   getUserFriendlyError,
   type MetricLogTimeSeriesPoint,
 } from '../../services/api';
@@ -384,6 +385,13 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
   const [asyncData, setAsyncData] = useState<MetricLogTimeSeriesPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // '' = all nodes combined; otherwise one hostName() from the cluster
+  const [nodes, setNodes] = useState<string[]>([]);
+  const [node, setNode] = useState('');
+
+  useEffect(() => {
+    fetchMetricLogNodes().then(setNodes).catch(() => setNodes([]));
+  }, []);
 
   // Load saved time range from localStorage
   useEffect(() => {
@@ -417,13 +425,13 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
 
       if (activeSource === 'memory') {
         const [metricResult, asyncResult] = await Promise.all([
-          fetchMetricLogTimeSeries(start, end, bucketSize, metrics),
-          fetchAsyncMetricLogTimeSeries(start, end, bucketSize, MEMORY_ASYNC_METRICS),
+          fetchMetricLogTimeSeries(start, end, bucketSize, metrics, node),
+          fetchAsyncMetricLogTimeSeries(start, end, bucketSize, MEMORY_ASYNC_METRICS, node),
         ]);
         setMetricData(metricResult);
         setAsyncData(asyncResult);
       } else {
-        const result = await fetchMetricLogTimeSeries(start, end, bucketSize, metrics);
+        const result = await fetchMetricLogTimeSeries(start, end, bucketSize, metrics, node);
         setMetricData(result);
         setAsyncData([]);
       }
@@ -434,7 +442,7 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
     } finally {
       setLoading(false);
     }
-  }, [activeSource, relativeMinutes, startTime, endTime, bucketSize]);
+  }, [activeSource, relativeMinutes, startTime, endTime, bucketSize, node]);
 
   // Load data when source or time range changes
   useEffect(() => {
@@ -544,6 +552,20 @@ export function DashboardTab({ filterBarContainer }: DashboardTabProps) {
             {METRIC_CHART_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
           </select>
         </div>
+        {nodes.length > 1 && (
+          <div className="flex items-center gap-1 ml-2 border-l border-gray-600 pl-2">
+            <label className="text-gray-400">Node:</label>
+            <select
+              value={node}
+              onChange={(e) => setNode(e.target.value)}
+              className="bg-gray-800 border border-gray-600 rounded px-1.5 py-0.5 text-white text-xs"
+              title="All nodes: gauges show the highest node, counters the cluster total"
+            >
+              <option value="">All nodes</option>
+              {nodes.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-3">
         <span className="text-xs text-gray-500">

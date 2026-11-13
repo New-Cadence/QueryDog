@@ -1797,7 +1797,8 @@ export async function fetchMetricLogTimeSeries(
   start: Date,
   end: Date,
   bucket: 'second' | 'minute' | 'hour' = 'minute',
-  metrics?: string[]
+  metrics?: string[],
+  node?: string
 ): Promise<MetricLogTimeSeriesPoint[]> {
   const params = new URLSearchParams({
     start: start.toISOString().slice(0, 19).replace('T', ' '),
@@ -1808,8 +1809,14 @@ export async function fetchMetricLogTimeSeries(
   if (metrics && metrics.length > 0) {
     params.set('metrics', metrics.join(','));
   }
+  if (node) params.set('node', node);
 
   return fetchJson(`/metric-log/timeseries?${params}`, 'Failed to fetch metric_log timeseries');
+}
+
+// Hostnames of the nodes the dashboards can be narrowed to
+export async function fetchMetricLogNodes(): Promise<string[]> {
+  return fetchJson('/metric-log/nodes', 'Failed to fetch cluster nodes');
 }
 
 // ==================== ASYNC METRIC LOG API (Dashboard) ====================
@@ -1818,7 +1825,8 @@ export async function fetchAsyncMetricLogTimeSeries(
   start: Date,
   end: Date,
   bucket: 'second' | 'minute' | 'hour' = 'minute',
-  metrics?: string[]
+  metrics?: string[],
+  node?: string
 ): Promise<MetricLogTimeSeriesPoint[]> {
   const params = new URLSearchParams({
     start: start.toISOString().slice(0, 19).replace('T', ' '),
@@ -1829,6 +1837,7 @@ export async function fetchAsyncMetricLogTimeSeries(
   if (metrics && metrics.length > 0) {
     params.set('metrics', metrics.join(','));
   }
+  if (node) params.set('node', node);
 
   return fetchJson(`/async-metric-log/timeseries?${params}`, 'Failed to fetch async metric_log timeseries');
 }

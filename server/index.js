@@ -5406,6 +5406,19 @@ app.get('/api/metric-log/columns', asyncHandler(async (req, res) => {
 }));
 
 // Get time series data for selected metrics
+// Dashboard node filter: hostName() runs on each replica under clusterAllReplicas,
+// so this narrows the time series to one node. No node = all nodes combined.
+const nodeFilter = (node) => (typeof node === 'string' && node ? 'AND hostName() = {node:String}' : '');
+
+// Nodes the dashboards can be narrowed to (one row on a single server)
+app.get('/api/metric-log/nodes', asyncHandler(async (req, res) => {
+  const result = await client.query({
+    query: `SELECT DISTINCT hostName() AS node FROM ${getSystemTable('one')} ORDER BY node`,
+    format: 'JSONEachRow',
+  });
+  res.json((await result.json()).map(r => r.node));
+}));
+
 app.get('/api/metric-log/timeseries', asyncHandler(async (req, res) => {
   const { start, end, bucket = 'minute', metrics } = req.query;
 
@@ -5466,14 +5479,15 @@ app.get('/api/metric-log/timeseries', asyncHandler(async (req, res) => {
     SELECT
       ${truncFunc} as time,
       ${selectClauses}
-    FROM system.metric_log
+    FROM ${getSystemTable('metric_log')}
     WHERE event_date >= toDate('${start}') AND event_date <= toDate('${end}')
       AND event_time >= '${start}' AND event_time <= '${end}'
+      ${nodeFilter(req.query.node)}
     GROUP BY time
     ORDER BY time
   `;
 
-  const result = await client.query({ query, format: 'JSONEachRow' });
+  const result = await client.query({ query, format: 'JSONEachRow', query_params: { node: String(req.query.node ?? '') } });
   const data = await result.json();
   res.json(data);
 }));
@@ -5553,15 +5567,16 @@ app.get('/api/async-metric-log/timeseries', asyncHandler(async (req, res) => {
     SELECT
       ${truncFunc} as time,
       ${selectClauses}
-    FROM system.asynchronous_metric_log
+    FROM ${getSystemTable('asynchronous_metric_log')}
     WHERE event_date >= toDate('${start}') AND event_date <= toDate('${end}')
       AND event_time >= '${start}' AND event_time <= '${end}'
       AND metric IN (${whereMetrics})
+      ${nodeFilter(req.query.node)}
     GROUP BY time
     ORDER BY time
   `;
 
-  const result = await client.query({ query, format: 'JSONEachRow' });
+  const result = await client.query({ query, format: 'JSONEachRow', query_params: { node: String(req.query.node ?? '') } });
   const data = await result.json();
   res.json(data);
 }));
