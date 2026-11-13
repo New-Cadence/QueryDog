@@ -1334,6 +1334,7 @@ export async function fetchViewDefinition(
 
 // System-wide dictionaries API
 export interface SystemDictionary {
+  hostname?: string;
   database: string;
   name: string;
   uuid: string;
@@ -1421,6 +1422,7 @@ export async function fetchDataSkippingIndexes(
 // ==================== TEXT LOG API ====================
 
 export interface TextLogEntry {
+  hostname?: string;
   event_time: string;
   event_time_microseconds: string;
   event_date: string;
@@ -1652,11 +1654,13 @@ export interface QueryResult {
   duration: number;
 }
 
-export async function executeQuery(query: string, limit = 1000): Promise<QueryResult> {
+// skipUnavailableNodes: on a cluster, leave out unreachable nodes instead of
+// failing (for clusterAllReplicas reads that should survive a node outage)
+export async function executeQuery(query: string, limit = 1000, opts: { skipUnavailableNodes?: boolean } = {}): Promise<QueryResult> {
   const response = await fetch(`${API_BASE}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, limit }),
+    body: JSON.stringify({ query, limit, ...opts }),
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
@@ -1797,7 +1801,8 @@ export async function fetchMetricLogTimeSeries(
   start: Date,
   end: Date,
   bucket: 'second' | 'minute' | 'hour' = 'minute',
-  metrics?: string[]
+  metrics?: string[],
+  node?: string
 ): Promise<MetricLogTimeSeriesPoint[]> {
   const params = new URLSearchParams({
     start: start.toISOString().slice(0, 19).replace('T', ' '),
@@ -1808,8 +1813,14 @@ export async function fetchMetricLogTimeSeries(
   if (metrics && metrics.length > 0) {
     params.set('metrics', metrics.join(','));
   }
+  if (node) params.set('node', node);
 
   return fetchJson(`/metric-log/timeseries?${params}`, 'Failed to fetch metric_log timeseries');
+}
+
+// Hostnames of the nodes the dashboards can be narrowed to
+export async function fetchMetricLogNodes(): Promise<string[]> {
+  return fetchJson('/metric-log/nodes', 'Failed to fetch cluster nodes');
 }
 
 // ==================== ASYNC METRIC LOG API (Dashboard) ====================
@@ -1818,7 +1829,8 @@ export async function fetchAsyncMetricLogTimeSeries(
   start: Date,
   end: Date,
   bucket: 'second' | 'minute' | 'hour' = 'minute',
-  metrics?: string[]
+  metrics?: string[],
+  node?: string
 ): Promise<MetricLogTimeSeriesPoint[]> {
   const params = new URLSearchParams({
     start: start.toISOString().slice(0, 19).replace('T', ' '),
@@ -1829,6 +1841,7 @@ export async function fetchAsyncMetricLogTimeSeries(
   if (metrics && metrics.length > 0) {
     params.set('metrics', metrics.join(','));
   }
+  if (node) params.set('node', node);
 
   return fetchJson(`/async-metric-log/timeseries?${params}`, 'Failed to fetch async metric_log timeseries');
 }

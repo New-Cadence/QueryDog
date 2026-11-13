@@ -1,5 +1,6 @@
 import { executeQuery } from '../services/api';
 import type { Recommendation, RecommendationProvider, RecommendationSeverity } from './types';
+import { nodes, type Nodes } from './cluster';
 
 // Performance recommendations derived from the last 24h of system.query_log
 // (slow, scan-heavy, memory-heavy and failing query patterns, concurrency) and
@@ -9,11 +10,19 @@ type Row = Record<string, unknown>;
 
 // Shared with reliability.ts: run a SELECT and swallow any error (missing
 // table, permissions, syntax differences between versions) as "no rows".
+// A down node is skipped rather than failing cluster-wide reads; reliability.ts
+// reports it from system.clusters. readonly=1 users may not change settings,
+// so they fall back to the plain query (which fails while a node is down).
 export async function queryRows(sql: string): Promise<Row[]> {
   try {
-    return (await executeQuery(sql, 1000)).data;
-  } catch {
-    return [];
+    return (await executeQuery(sql, 1000, { skipUnavailableNodes: true })).data;
+  } catch (err) {
+    if (!/READONLY|Cannot modify 'skip_unavailable_shards'/.test(err instanceof Error ? err.message : '')) return [];
+    try {
+      return (await executeQuery(sql, 1000)).data;
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -36,9 +45,8 @@ const fmtMs = (ms: number) =>
 const fmtCount = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(Math.round(n));
 const truncate = (s: string, n = 400) => (s.length > n ? `${s.slice(0, n)}...` : s);
 
-// Every query_log check looks at user queries from the last 24 hours. Queries
-// touching only system tables (including Convoy's own) are ignored.
-const QUERY_LOG = 'system.query_log';
+// Every query_log check looks at user queries from the last 24 hours, across
+// all nodes. Queries touching only system tables (including Convoy's own) are ignored.
 const WINDOW = `event_date >= toDate(now() - INTERVAL 1 DAY) AND event_time >= now() - INTERVAL 1 DAY
     AND NOT arrayAll(d -> lower(d) IN ('system', 'information_schema'), databases)`;
 
@@ -69,7 +77,7 @@ function candidateColumn(table: string, columns: string[], sortingKey: string): 
     .find(c => !keyCols.has(c) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(c));
 }
 
-async function queryPatternChecks(): Promise<Recommendation[]> {
+async function queryPatternChecks(n: Nodes): Promise<Recommendation[]> {
   const [patterns, limits] = await Promise.all([
     queryRows(`
       SELECT
@@ -83,7 +91,7 @@ async function queryPatternChecks(): Promise<Recommendation[]> {
         quantile(0.95)(memory_usage) AS p95_memory,
         any(arrayFilter(t -> NOT startsWith(t, 'system.'), tables)[1]) AS main_table,
         groupUniqArrayArray(50)(columns) AS columns
-      FROM ${QUERY_LOG}
+      FROM ${n.table('query_log')}
       WHERE ${WINDOW} AND type = 'QueryFinish' AND query_kind = 'Select' AND is_initial_query
       GROUP BY normalized_query_hash
       HAVING p95_ms >= 1000 OR p95_memory >= ${GiB} OR (read_rows >= 10000000 AND read_rows >= 1000 * greatest(result_rows, 1))
@@ -185,7 +193,7 @@ const FAILURE_ADVICE: Record<string, string> = {
   QUERY_WAS_CANCELLED: '-- Queries are being cancelled (client timeouts or KILL QUERY): check client timeouts.',
 };
 
-async function failingQueryChecks(): Promise<Recommendation[]> {
+async function failingQueryChecks(n: Nodes): Promise<Recommendation[]> {
   const rows = await queryRows(`
     SELECT
       toString(normalized_query_hash) AS hash,
@@ -194,7 +202,7 @@ async function failingQueryChecks(): Promise<Recommendation[]> {
       any(query) AS sample,
       any(exception) AS message,
       any(arrayFilter(t -> NOT startsWith(t, 'system.'), tables)[1]) AS main_table
-    FROM ${QUERY_LOG}
+    FROM ${n.table('query_log')}
     WHERE ${WINDOW} AND type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing')
     GROUP BY normalized_query_hash, exception_code
     HAVING failures >= 10
@@ -217,63 +225,66 @@ async function failingQueryChecks(): Promise<Recommendation[]> {
   });
 }
 
-async function concurrencyCheck(): Promise<Recommendation[]> {
-  const [peak, limit] = await Promise.all([
+// max_concurrent_queries is a per-server limit, so the busiest minute is found per node.
+async function concurrencyCheck(n: Nodes): Promise<Recommendation[]> {
+  const [peaks, limits] = await Promise.all([
     queryRows(`
-      SELECT toString(toStartOfMinute(event_time)) AS minute, sum(query_duration_ms) / 60000 AS avg_concurrency, count() AS queries
-      FROM ${QUERY_LOG}
+      SELECT hostName() AS host, toString(toStartOfMinute(event_time)) AS minute, sum(query_duration_ms) / 60000 AS avg_concurrency, count() AS queries
+      FROM ${n.table('query_log')}
       WHERE ${WINDOW} AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
-      GROUP BY minute
+      GROUP BY host, minute
       ORDER BY avg_concurrency DESC
-      LIMIT 1`),
-    queryRows("SELECT toUInt64(value) AS v FROM system.server_settings WHERE name = 'max_concurrent_queries' LIMIT 1"),
+      LIMIT 1 BY host`),
+    queryRows(`SELECT hostName() AS host, toUInt64(value) AS v FROM ${n.table('server_settings')} WHERE name = 'max_concurrent_queries'`),
   ]);
-  if (!peak.length) return [];
-  const concurrency = num(peak[0].avg_concurrency);
-  const max = num(limit[0]?.v);
-  const share = max ? concurrency / max : 0;
-  if (concurrency < 16 && share < 0.5) return [];
-  return [{
-    id: 'performance:high-concurrency',
-    category: 'performance',
-    severity: share >= 0.8 ? 'high' : 'medium',
-    title: `High query concurrency (peak ~${concurrency.toFixed(0)} concurrent queries)`,
-    detail: `During the busiest minute (${str(peak[0].minute)}) an average of ${concurrency.toFixed(1)} queries were running at once ` +
-      `(${num(peak[0].queries).toLocaleString()} queries finished in that minute)` +
-      (max ? `; max_concurrent_queries is ${max}.` : '.') +
-      ' Heavy concurrency makes queries compete for CPU and memory and raises tail latency.',
-    target: 'server',
-    impact: max ? `${(share * 100).toFixed(0)}% of max_concurrent_queries at peak` : `~${concurrency.toFixed(0)} concurrent queries at peak`,
-    remediation:
-      '-- Find which users drive the peak:\n' +
-      `SELECT user, count() AS queries, sum(query_duration_ms) / 60000 AS busy_minutes\nFROM system.query_log\nWHERE event_time >= now() - INTERVAL 1 DAY AND type = 'QueryFinish'\nGROUP BY user ORDER BY busy_minutes DESC LIMIT 10;\n\n` +
-      '-- Then cap noisy workloads, e.g. with a settings profile / workload:\n' +
-      "-- ALTER USER <user> SETTINGS max_threads = 4, max_concurrent_queries_for_user = 10;",
-  }];
+  const maxByHost = new Map(limits.map(l => [str(l.host), num(l.v)]));
+  return peaks.flatMap(peak => {
+    const concurrency = num(peak.avg_concurrency);
+    const max = maxByHost.get(str(peak.host)) ?? 0;
+    const share = max ? concurrency / max : 0;
+    if (concurrency < 16 && share < 0.5) return [];
+    return [n.tag<Recommendation>({
+      id: 'performance:high-concurrency',
+      category: 'performance',
+      severity: share >= 0.8 ? 'high' : 'medium',
+      title: `High query concurrency (peak ~${concurrency.toFixed(0)} concurrent queries)`,
+      detail: `During the busiest minute (${str(peak.minute)}) an average of ${concurrency.toFixed(1)} queries were running at once ` +
+        `(${num(peak.queries).toLocaleString()} queries finished in that minute)` +
+        (max ? `; max_concurrent_queries is ${max}.` : '.') +
+        ' Heavy concurrency makes queries compete for CPU and memory and raises tail latency.',
+      target: 'server',
+      impact: max ? `${(share * 100).toFixed(0)}% of max_concurrent_queries at peak` : `~${concurrency.toFixed(0)} concurrent queries at peak`,
+      remediation:
+        '-- Find which users drive the peak:\n' +
+        `SELECT user, count() AS queries, sum(query_duration_ms) / 60000 AS busy_minutes\nFROM system.query_log\nWHERE event_time >= now() - INTERVAL 1 DAY AND type = 'QueryFinish'\nGROUP BY user ORDER BY busy_minutes DESC LIMIT 10;\n\n` +
+        '-- Then cap noisy workloads, e.g. with a settings profile / workload:\n' +
+        "-- ALTER USER <user> SETTINGS max_threads = 4, max_concurrent_queries_for_user = 10;",
+    }, peak.host)];
+  });
 }
 
-async function partsChecks(): Promise<Recommendation[]> {
+async function partsChecks(n: Nodes): Promise<Recommendation[]> {
   const [partitions, tables, merges] = await Promise.all([
     queryRows(`
-      SELECT database, table, partition_id, count() AS parts
-      FROM system.parts
+      SELECT hostName() AS host, database, table, partition_id, count() AS parts
+      FROM ${n.storage('parts')}
       WHERE active AND database != 'system'
-      GROUP BY database, table, partition_id
+      GROUP BY host, database, table, partition_id
       HAVING parts >= 300
       ORDER BY parts DESC
       LIMIT 20`),
     queryRows(`
-      SELECT database, table, count() AS parts, sum(bytes_on_disk) AS bytes, uniqExact(partition_id) AS partitions,
+      SELECT hostName() AS host, database, table, count() AS parts, sum(bytes_on_disk) AS bytes, uniqExact(partition_id) AS partitions,
         countIf(level = 0 AND modification_time < now() - INTERVAL 1 HOUR) AS stale_unmerged
-      FROM system.parts
+      FROM ${n.storage('parts')}
       WHERE active AND database != 'system'
-      GROUP BY database, table
+      GROUP BY host, database, table
       HAVING (parts >= 50 AND bytes / parts < ${MiB}) OR partitions >= 1000 OR stale_unmerged >= 50
       ORDER BY parts DESC
       LIMIT 30`),
     queryRows(`
-      SELECT database, table, result_part_name, elapsed, progress, num_parts, is_mutation, total_size_bytes_compressed AS bytes
-      FROM system.merges
+      SELECT hostName() AS host, database, table, result_part_name, elapsed, progress, num_parts, is_mutation, total_size_bytes_compressed AS bytes
+      FROM ${n.table('merges')}
       WHERE elapsed >= 3600
       ORDER BY elapsed DESC
       LIMIT 10`),
@@ -284,7 +295,7 @@ async function partsChecks(): Promise<Recommendation[]> {
     const table = `${str(p.database)}.${str(p.table)}`;
     const parts = num(p.parts);
     const partition = str(p.partition_id);
-    recs.push({
+    recs.push(n.tagStorage<Recommendation>({
       id: `performance:parts-per-partition:${table}:${partition}`,
       category: 'performance',
       severity: parts >= 1000 ? 'high' : 'medium',
@@ -295,7 +306,7 @@ async function partsChecks(): Promise<Recommendation[]> {
       impact: 'Risk of TOO_MANY_PARTS insert failures',
       remediation: `-- Batch inserts (10k-1M rows per insert) or let the server batch them:\nALTER USER <insert_user> SETTINGS async_insert = 1, wait_for_async_insert = 1;\n\n` +
         `-- Merge the partition now (heavy: runs a full merge):\nOPTIMIZE TABLE ${table} PARTITION ID ${sqlString(partition)} FINAL;`,
-    });
+    }, p.host));
   }
 
   for (const t of tables) {
@@ -305,7 +316,7 @@ async function partsChecks(): Promise<Recommendation[]> {
     const partitionsCount = num(t.partitions);
     const stale = num(t.stale_unmerged);
     if (parts >= 50 && bytes / parts < MiB) {
-      recs.push({
+      recs.push(n.tagStorage<Recommendation>({
         id: `performance:small-parts:${table}`,
         category: 'performance',
         severity: parts >= 500 ? 'high' : 'medium',
@@ -316,10 +327,10 @@ async function partsChecks(): Promise<Recommendation[]> {
         impact: `${parts.toLocaleString()} parts to open per full read`,
         remediation: `-- Buffer small inserts server-side:\nALTER USER <insert_user> SETTINGS async_insert = 1, wait_for_async_insert = 1, async_insert_busy_timeout_ms = 1000;\n\n` +
           `-- Compact the existing parts:\nOPTIMIZE TABLE ${table} FINAL;`,
-      });
+      }, t.host));
     }
     if (partitionsCount >= 1000) {
-      recs.push({
+      recs.push(n.tagStorage<Recommendation>({
         id: `performance:over-partitioned:${table}`,
         category: 'performance',
         severity: 'medium',
@@ -330,10 +341,10 @@ async function partsChecks(): Promise<Recommendation[]> {
         impact: 'Higher part count, slower merges and queries',
         remediation: `-- Inspect the current key:\nSELECT partition_key, sorting_key FROM system.tables WHERE database = ${sqlString(str(t.database))} AND name = ${sqlString(str(t.table))};\n\n` +
           `-- Recreate with a coarser key, e.g. PARTITION BY toYYYYMM(<date_column>), then INSERT ... SELECT and EXCHANGE TABLES.`,
-      });
+      }, t.host));
     }
     if (stale >= 50) {
-      recs.push({
+      recs.push(n.tagStorage<Recommendation>({
         id: `performance:merges-behind:${table}`,
         category: 'performance',
         severity: stale >= 300 ? 'high' : 'medium',
@@ -344,13 +355,13 @@ async function partsChecks(): Promise<Recommendation[]> {
         impact: 'Part count growing towards TOO_MANY_PARTS',
         remediation: `-- Make sure merges are not stopped for this table:\nSYSTEM START MERGES ${table};\n\n` +
           `-- Check merge pool saturation:\nSELECT metric, value FROM system.metrics WHERE metric IN ('BackgroundMergesAndMutationsPoolTask', 'BackgroundMergesAndMutationsPoolSize');`,
-      });
+      }, t.host));
     }
   }
 
   for (const m of merges) {
     const table = `${str(m.database)}.${str(m.table)}`;
-    recs.push({
+    recs.push(n.tag<Recommendation>({
       id: `performance:long-merge:${table}:${str(m.result_part_name)}`,
       category: 'performance',
       severity: 'medium',
@@ -360,7 +371,7 @@ async function partsChecks(): Promise<Recommendation[]> {
       target: table,
       impact: 'Holds a background pool slot and disk space for the duration',
       remediation: `SELECT * FROM system.merges WHERE database = ${sqlString(str(m.database))} AND table = ${sqlString(str(m.table))};`,
-    });
+    }, m.host));
   }
   return recs;
 }
@@ -369,9 +380,9 @@ export const performanceProvider: RecommendationProvider = {
   category: 'performance',
   label: 'Performance',
   run: async () => {
-    const tables = await systemTables();
-    const checks = [partsChecks()];
-    if (tables.has('query_log')) checks.push(queryPatternChecks(), failingQueryChecks(), concurrencyCheck());
+    const [tables, n] = await Promise.all([systemTables(), nodes()]);
+    const checks = [partsChecks(n)];
+    if (tables.has('query_log')) checks.push(queryPatternChecks(n), failingQueryChecks(n), concurrencyCheck(n));
     const results = await Promise.all(checks.map(c => c.catch(() => [])));
     return results.flat();
   },

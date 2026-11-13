@@ -1,5 +1,6 @@
 import { executeQuery } from '../services/api';
 import type { Recommendation, RecommendationProvider, RecommendationSeverity } from './types';
+import { nodes } from './cluster';
 
 // Schema design issues found from system.tables / system.columns, plus a sampled scan of Nullable and String columns.
 
@@ -122,6 +123,8 @@ export const schemaProvider: RecommendationProvider = {
   category: 'schema',
   label: 'Schema',
   run: async () => {
+    // Queries can land on any node, so usage is read from every node's query_log
+    const queryLog = (await nodes()).table('query_log');
     const [tables, columns, logCheck] = await Promise.all([
       safeRows<TableRow>(`
         SELECT database, name, engine, toUInt64(ifNull(total_rows, 0)) AS total_rows, toUInt64(ifNull(total_bytes, 0)) AS total_bytes,
@@ -135,7 +138,7 @@ export const schemaProvider: RecommendationProvider = {
         WHERE ${user} AND (type LIKE 'Nullable(%' OR type = 'String') AND NOT is_in_sorting_key AND NOT is_in_partition_key
         LIMIT 100000`),
       safeRows<{ covers_window: number }>(`
-        SELECT min(event_time) <= now() - INTERVAL 6 DAY AS covers_window FROM system.query_log
+        SELECT min(event_time) <= now() - INTERVAL 6 DAY AS covers_window FROM ${queryLog}
         WHERE event_date >= today() - 7 LIMIT 1`),
     ]);
     for (const t of tables) {
@@ -184,7 +187,7 @@ export const schemaProvider: RecommendationProvider = {
     if (Number(logCheck[0]?.covers_window) === 1) {
       const used = new Set(
         (await safeRows<{ t: string }>(`
-          SELECT DISTINCT arrayJoin(tables) AS t FROM system.query_log
+          SELECT DISTINCT arrayJoin(tables) AS t FROM ${queryLog}
           WHERE event_date >= today() - 7 AND event_time >= now() - INTERVAL 7 DAY AND type = 'QueryFinish'
           LIMIT 100000`)).map(r => r.t),
       );

@@ -15,6 +15,9 @@ export interface Recommendation {
   detail: string;
   // The object it applies to: a table, user, service, query hash...
   target?: string;
+  // Cluster node the finding was seen on; unset for cluster-wide findings
+  // and on a single server
+  host?: string;
   // SQL or a concrete action the user can take
   remediation?: string;
   // Short human readable impact, e.g. 'Saves ~$420/month' or 'Cuts p95 by ~40%'

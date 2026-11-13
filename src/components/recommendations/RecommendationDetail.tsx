@@ -65,6 +65,7 @@ export function RecommendationDetail({
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         <div className="grid grid-cols-2 gap-3">
           {row.target && <DetailField label="Target"><span className="font-mono">{row.target}</span></DetailField>}
+          {row.host && <DetailField label="Host"><span className="font-mono">{row.host}</span></DetailField>}
           {row.impact && <DetailField label="Impact">{row.impact}</DetailField>}
           {!!row.estimatedMonthlySaving && (
             <DetailField label="Estimated saving"><span className="text-emerald-400">{formatMoney(row.estimatedMonthlySaving)}/month</span></DetailField>

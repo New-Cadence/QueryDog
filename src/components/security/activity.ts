@@ -1,6 +1,7 @@
 // Login / session activity from system.session_log, shared by the Logins tab
 // and the security recommendation provider.
 import { executeQuery } from '../../services/api';
+import { nodes } from '../../recommendations/cluster';
 
 export async function systemTableExists(name: string): Promise<boolean> {
   try {
@@ -31,18 +32,20 @@ export const FAILED_LOGIN_THRESHOLD = 5;
 export async function loadLoginStats(): Promise<LoginStats | null> {
   if (!(await systemTableExists('session_log'))) return null;
   try {
+    // Logins land on any node of a cluster
+    const sessionLog = (await nodes()).table('session_log');
     const [coverage, last, failures] = await Promise.all([
-      executeQuery(`SELECT dateDiff('day', min(event_time), now()) AS days FROM system.session_log`),
+      executeQuery(`SELECT dateDiff('day', min(event_time), now()) AS days FROM ${sessionLog}`),
       executeQuery(`
         SELECT user, max(event_time) AS last_login, dateDiff('day', max(event_time), now()) AS days_since, count() AS logins
-        FROM system.session_log
+        FROM ${sessionLog}
         WHERE type = 'LoginSuccess' AND user IS NOT NULL
         GROUP BY user
         ORDER BY user
         LIMIT 10000`),
       executeQuery(`
         SELECT user, count() AS failures, groupUniqArray(20)(toString(client_address)) AS addresses, max(event_time) AS last_failure
-        FROM system.session_log
+        FROM ${sessionLog}
         WHERE type = 'LoginFailure' AND event_time >= now() - INTERVAL 1 DAY
         GROUP BY user
         ORDER BY failures DESC

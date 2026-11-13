@@ -76,6 +76,13 @@ export function DictionariesTab({ filters, search }: DictionariesTabProps) {
         );
       },
     },
+    // Only on a cluster, where the server tags rows with their node
+    ...(dictionaries.some(d => d.hostname) ? [{
+      headerName: 'Host',
+      field: 'hostname' as const,
+      width: 170,
+      sortable: true,
+    }] : []),
     {
       headerName: 'Database',
       field: 'database',
@@ -147,7 +154,7 @@ export function DictionariesTab({ filters, search }: DictionariesTabProps) {
       sortable: true,
       cellStyle: { color: '#9ca3af' },
     },
-  ], [handleViewDetails]);
+  ], [handleViewDetails, dictionaries]);
 
   const defaultColDef = useMemo<ColDef>(() => ({
     resizable: true,
@@ -175,7 +182,7 @@ export function DictionariesTab({ filters, search }: DictionariesTabProps) {
         suppressCellFocus={true}
         enableCellTextSelection={true}
         onFirstDataRendered={onFirstDataRendered}
-        getRowId={(params) => `${params.data.database}-${params.data.name}`}
+        getRowId={(params) => `${params.data.hostname ?? ''}-${params.data.database}-${params.data.name}`}
       />
 
       {/* Dictionary Details Modal */}

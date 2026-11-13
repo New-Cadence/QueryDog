@@ -40,9 +40,10 @@ const FILTER_FIELDS: ClientFilterField<RecommendationRow>[] = [
   { field: 'severity', label: 'Severity' },
   { field: 'status', label: 'Status' },
   { field: 'target', label: 'Target' },
+  { field: 'host', label: 'Host' },
 ];
 
-const searchText = (r: RecommendationRow) => `${r.title} ${r.detail} ${r.target ?? ''} ${r.impact ?? ''} ${r.id}`;
+const searchText = (r: RecommendationRow) => `${r.title} ${r.detail} ${r.target ?? ''} ${r.host ?? ''} ${r.impact ?? ''} ${r.id}`;
 
 function SeverityCell({ data }: ICellRendererParams<RecommendationRow>) {
   return data ? <Pill tone={SEVERITY_TONE[data.severity]}>{data.severity}</Pill> : null;
@@ -74,6 +75,7 @@ const COLUMNS: ColDef<RecommendationRow>[] = [
   { field: 'category', headerName: 'Category', width: 140, cellRenderer: CategoryCell },
   { field: 'title', headerName: 'Title', flex: 2, minWidth: 260, tooltipField: 'title' },
   { field: 'target', headerName: 'Target', flex: 1, minWidth: 160, tooltipField: 'target' },
+  { field: 'host', headerName: 'Host', width: 150, tooltipField: 'host' },
   { field: 'impact', headerName: 'Impact', flex: 1, minWidth: 160, tooltipField: 'impact' },
   {
     field: 'estimatedMonthlySaving', headerName: 'Saving / month', width: 125, type: 'rightAligned',
@@ -152,6 +154,12 @@ export function RecommendationsPage() {
       .map(e => ({ ...e.rec, status: effectiveStatus(e), firstSeen: e.firstSeen, lastSeen: e.lastSeen, snoozeUntil: e.snoozeUntil, reason: e.reason }))
       .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || (b.estimatedMonthlySaving || 0) - (a.estimatedMonthlySaving || 0)),
   [store]);
+
+  // Host only means something on a cluster
+  const columns = useMemo(() => {
+    const anyHost = allRows.some(r => r.host);
+    return COLUMNS.map(c => (c.field === 'host' ? { ...c, hide: !anyHost } : c));
+  }, [allRows]);
 
   const viewCounts = useMemo(() => {
     const counts = {} as Record<View, number>;
@@ -323,7 +331,7 @@ export function RecommendationsPage() {
                 ref={gridRef}
                 theme={gridTheme}
                 rowData={filtered}
-                columnDefs={COLUMNS}
+                columnDefs={columns}
                 defaultColDef={{ resizable: true, sortable: true, suppressMovable: true }}
                 getRowId={p => p.data.id}
                 rowSelection={{ mode: 'multiRow', checkboxes: true, headerCheckbox: true, enableClickSelection: false }}
